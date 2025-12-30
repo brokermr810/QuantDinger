@@ -390,7 +390,7 @@ export default {
 
     // 跳转到文档中心
     goToDocs () {
-      window.open('https://www.quantdinger.com/development_guide.html', '_blank')
+      window.open('https://github.com/brokermr810/QuantDinger/blob/main/docs/STRATEGY_DEV_GUIDE.md', '_blank')
     },
 
     // 清理代码中的 markdown 代码块标记

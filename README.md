@@ -59,6 +59,9 @@ Unlike expensive SaaS platforms, QuantDinger returns **data ownership** to you. 
 
 ---
 
+## 📚 Documentation
+- [Python Strategy Development Guide](docs/STRATEGY_DEV_GUIDE.md)
+
 ## 📸 Visual Tour
 
 <div align="center">

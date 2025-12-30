@@ -124,7 +124,7 @@ CONFIG_SCHEMA = {
             {'key': 'FINNHUB_API_KEY', 'label': 'Finnhub API Key', 'type': 'password', 'required': False, 'link': 'https://finnhub.io/register', 'link_text': 'settings.link.freeRegister'},
             {'key': 'FINNHUB_TIMEOUT', 'label': 'Finnhub超时(秒)', 'type': 'number', 'default': '10'},
             {'key': 'FINNHUB_RATE_LIMIT', 'label': 'Finnhub速率限制', 'type': 'number', 'default': '60'},
-            {'key': 'CCXT_DEFAULT_EXCHANGE', 'label': 'CCXT默认交易所', 'type': 'text', 'default': 'binance', 'link': 'https://github.com/ccxt/ccxt#supported-cryptocurrency-exchange-markets', 'link_text': 'settings.link.supportedExchanges'},
+            {'key': 'CCXT_DEFAULT_EXCHANGE', 'label': 'CCXT默认交易所', 'type': 'text', 'default': 'coinbase', 'link': 'https://github.com/ccxt/ccxt#supported-cryptocurrency-exchange-markets', 'link_text': 'settings.link.supportedExchanges'},
             {'key': 'CCXT_TIMEOUT', 'label': 'CCXT超时(ms)', 'type': 'number', 'default': '10000'},
             {'key': 'CCXT_PROXY', 'label': 'CCXT代理', 'type': 'text', 'required': False},
             {'key': 'AKSHARE_TIMEOUT', 'label': 'Akshare超时(秒)', 'type': 'number', 'default': '30'},

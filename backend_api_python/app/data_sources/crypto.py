@@ -1,6 +1,6 @@
 """
 加密货币数据源
-使用 CCXT (Binance) 获取数据
+使用 CCXT (Coinbase) 获取数据
 """
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timedelta
@@ -34,11 +34,19 @@ class CryptoDataSource(BaseDataSource):
                 'https': CCXTConfig.PROXY
             }
         
-        self.exchange = ccxt.binance(config)
+        exchange_id = CCXTConfig.DEFAULT_EXCHANGE
+        
+        # 动态加载交易所类
+        if not hasattr(ccxt, exchange_id):
+            logger.warning(f"CCXT exchange '{exchange_id}' not found, falling back to 'coinbase'")
+            exchange_id = 'coinbase'
+            
+        exchange_class = getattr(ccxt, exchange_id)
+        self.exchange = exchange_class(config)
 
     def get_ticker(self, symbol: str) -> Dict[str, Any]:
         """
-        Get latest ticker for a crypto symbol via CCXT (Binance).
+        Get latest ticker for a crypto symbol via CCXT.
 
         Accepts common formats:
         - BTC/USDT
@@ -50,6 +58,7 @@ class CryptoDataSource(BaseDataSource):
             sym = sym.split(":", 1)[0]
         sym = sym.upper()
         if "/" not in sym:
+            # Coinbase often uses USD, check if we need to adapt
             if sym.endswith("USDT") and len(sym) > 4:
                 sym = f"{sym[:-4]}/USDT"
             elif sym.endswith("USD") and len(sym) > 3:
@@ -131,7 +140,7 @@ class CryptoDataSource(BaseDataSource):
                 
                 # 分页获取数据，直到覆盖完整时间范围
                 all_ohlcv = []
-                batch_limit = 1000  # Binance 单次最大返回量
+                batch_limit = 300  # Coinbase limit is often 300, safer than 1000
                 current_since = since
                 
                 while current_since < end_ms:

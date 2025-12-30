@@ -59,6 +59,9 @@
 
 ---
 
+## 📚 문서
+- [Python 전략 개발 가이드](docs/STRATEGY_DEV_GUIDE_KO.md)
+
 ## 📸 비주얼 투어
 
 <div align="center">

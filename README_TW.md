@@ -59,6 +59,9 @@
 
 ---
 
+## 📚 文檔
+- [Python 策略開發指南](docs/STRATEGY_DEV_GUIDE_TW.md)
+
 ## 📸 功能預覽
 
 <div align="center">
