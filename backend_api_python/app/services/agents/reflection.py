@@ -91,7 +91,7 @@ class ReflectionService:
             
             conn.commit()
             conn.close()
-            logger.info(f"已记录分析用于反思: {market}:{symbol}, 将在 {check_days} 天后验证")
+            logger.info(f"Recorded analysis for reflection: {market}:{symbol}, will verify after {check_days} day(s)")
         except Exception as e:
             logger.error(f"记录分析失败: {e}")
 
@@ -148,37 +148,52 @@ class ReflectionService:
                     
                     if decision == "BUY":
                         if actual_return > 2.0:
-                            result_desc = "准确：买入后价格上涨"
+                            result_desc = "Correct: price rose after BUY"
                             is_good_prediction = True
                         elif actual_return < -2.0:
-                            result_desc = "错误：买入后价格下跌"
+                            result_desc = "Wrong: price fell after BUY"
                         else:
-                            result_desc = "中性：价格波动不大"
+                            result_desc = "Neutral: limited price movement"
                     elif decision == "SELL":
                         if actual_return < -2.0:
-                            result_desc = "准确：卖出后价格下跌"
+                            result_desc = "Correct: price fell after SELL"
                             is_good_prediction = True
                         elif actual_return > 2.0:
-                            result_desc = "错误：卖出后价格上涨"
+                            result_desc = "Wrong: price rose after SELL"
                         else:
-                            result_desc = "中性：价格波动不大"
+                            result_desc = "Neutral: limited price movement"
                     else: # HOLD
                         if -2.0 <= actual_return <= 2.0:
-                            result_desc = "准确：持有期间波动不大"
+                            result_desc = "Correct: limited movement during HOLD"
                             is_good_prediction = True
                         else:
-                            result_desc = f"偏差：持有期间出现了较大波动 ({actual_return:.2f}%)"
+                            result_desc = f"Deviated: large movement during HOLD ({actual_return:.2f}%)"
 
                     # 4. 写入记忆系统 (Let the agent learn)
-                    memory_situation = f"{market}:{symbol} 自动验证 (预测日期: {analysis_date})"
-                    memory_recommendation = f"当时决策: {decision} (置信度 {confidence}), 理由: {reasoning[:50]}..."
-                    memory_result = f"验证结果: {result_desc}, 实际收益: {actual_return:.2f}% (初始 {initial_price} -> 最新 {current_price})"
+                    memory_situation = f"{market}:{symbol} auto-verified (analysis_date: {analysis_date})"
+                    memory_recommendation = f"Decision: {decision} (confidence {confidence}), reasoning: {(reasoning or '')[:120]}"
+                    memory_result = f"Verification: {result_desc}; return={actual_return:.2f}% (initial {initial_price} -> final {current_price})"
                     
                     trader_memory.add_memory(
                         memory_situation,
                         memory_recommendation,
                         memory_result,
-                        actual_return
+                        actual_return,
+                        metadata={
+                            "market": market,
+                            "symbol": symbol,
+                            "timeframe": "1D",
+                            "features": {
+                                "source": "auto_verify",
+                                "decision": decision,
+                                "confidence": confidence,
+                                "initial_price": initial_price,
+                                "final_price": current_price,
+                                "analysis_date": str(analysis_date),
+                                "result_desc": result_desc,
+                                "is_good_prediction": bool(is_good_prediction),
+                            },
+                        }
                     )
                     
                     # 5. 更新记录状态

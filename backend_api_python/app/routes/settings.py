@@ -95,6 +95,27 @@ CONFIG_SCHEMA = {
             {'key': 'ENABLE_AI_ANALYSIS', 'label': '启用AI分析', 'type': 'boolean', 'default': 'True'},
         ]
     },
+    'agent_memory': {
+        'title': '记忆/反思配置',
+        'items': [
+            {'key': 'ENABLE_AGENT_MEMORY', 'label': '启用Agent记忆', 'type': 'boolean', 'default': 'True'},
+            {'key': 'AGENT_MEMORY_ENABLE_VECTOR', 'label': '启用向量检索(本地)', 'type': 'boolean', 'default': 'True'},
+            {'key': 'AGENT_MEMORY_EMBEDDING_DIM', 'label': 'Embedding维度', 'type': 'number', 'default': '256'},
+            {'key': 'AGENT_MEMORY_TOP_K', 'label': '召回数量TopK', 'type': 'number', 'default': '5'},
+            {'key': 'AGENT_MEMORY_CANDIDATE_LIMIT', 'label': '候选窗口大小', 'type': 'number', 'default': '500'},
+            {'key': 'AGENT_MEMORY_HALF_LIFE_DAYS', 'label': '时间衰减半衰期(天)', 'type': 'number', 'default': '30'},
+            {'key': 'AGENT_MEMORY_W_SIM', 'label': '相似度权重', 'type': 'number', 'default': '0.75'},
+            {'key': 'AGENT_MEMORY_W_RECENCY', 'label': '时间权重', 'type': 'number', 'default': '0.20'},
+            {'key': 'AGENT_MEMORY_W_RETURNS', 'label': '收益权重', 'type': 'number', 'default': '0.05'},
+        ]
+    },
+    'reflection_worker': {
+        'title': '自动反思验证Worker',
+        'items': [
+            {'key': 'ENABLE_REFLECTION_WORKER', 'label': '启用自动验证', 'type': 'boolean', 'default': 'False'},
+            {'key': 'REFLECTION_WORKER_INTERVAL_SEC', 'label': '验证周期间隔(秒)', 'type': 'number', 'default': '86400'},
+        ]
+    },
     'ai': {
         'title': 'AI/LLM配置',
         'items': [

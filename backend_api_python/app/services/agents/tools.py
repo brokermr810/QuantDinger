@@ -82,27 +82,45 @@ class AgentTools:
         """Whether akshare is available at runtime."""
         return bool(self._has_akshare and self._ak is not None)
     
-    def get_stock_data(self, market: str, symbol: str, days: int = 30) -> Optional[List[Dict[str, Any]]]:
+    def get_stock_data(self, market: str, symbol: str, days: int = 30, timeframe: str = "1d") -> Optional[List[Dict[str, Any]]]:
         """
         Get daily Kline data for recent days (best-effort).
         
         Args:
             market: Market
             symbol: Symbol
-            days: Days
+            days: Days (for daily) / candle count hint (best-effort for intraday)
+            timeframe: Kline timeframe (best-effort). Common values: 1d, 1h, 4h, 1w
             
         Returns:
             List of OHLCV dicts or None
         """
         try:
             klines = []
+            tf = (timeframe or "1d").strip().lower()
+            # Normalize common UI values
+            tf_map = {
+                "1d": "1d",
+                "1day": "1d",
+                "d": "1d",
+                "1h": "1h",
+                "60m": "1h",
+                "4h": "4h",
+                "240m": "4h",
+                "1w": "1wk",
+                "1wk": "1wk",
+                "w": "1wk",
+            }
+            tf_yf = tf_map.get(tf, "1d")
             
             if market == 'USStock':
                 end_date = datetime.now().strftime('%Y-%m-%d')
                 start_date = (datetime.now() - timedelta(days=days + 5)).strftime('%Y-%m-%d')
                 
                 ticker = yf.Ticker(symbol)
-                df = ticker.history(start=start_date, end=end_date, interval="1d")
+                # yfinance supports limited intervals. Fallback to 1d when unsupported.
+                interval = tf_yf if tf_yf in ["1d", "1h", "1wk"] else "1d"
+                df = ticker.history(start=start_date, end=end_date, interval=interval)
                 
                 if not df.empty:
                     df = df.tail(days).reset_index()
@@ -121,7 +139,9 @@ class AgentTools:
                 exchange = self._ccxt_exchange()
                 symbol_pair = f'{symbol}/USDT'
                 start_time = int((datetime.now() - timedelta(days=days)).timestamp())
-                ohlcv = exchange.fetch_ohlcv(symbol_pair, '1d', since=start_time * 1000, limit=days)
+                # CCXT timeframes: 1d, 1h, 4h ...
+                ccxt_tf = tf if tf in ["1d", "1h", "4h"] else "1d"
+                ohlcv = exchange.fetch_ohlcv(symbol_pair, ccxt_tf, since=start_time * 1000, limit=days)
                 if ohlcv:
                     for candle in ohlcv:
                         klines.append({
@@ -175,7 +195,8 @@ class AgentTools:
                 start_date = (datetime.now() - timedelta(days=days + 5)).strftime('%Y-%m-%d')
 
                 ticker = yf.Ticker(yf_symbol)
-                df = ticker.history(start=start_date, end=end_date, interval="1d")
+                interval = tf_yf if tf_yf in ["1d", "1h", "1wk"] else "1d"
+                df = ticker.history(start=start_date, end=end_date, interval=interval)
 
                 if not df.empty:
                     df = df.tail(days).reset_index()

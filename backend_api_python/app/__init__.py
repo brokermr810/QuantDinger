@@ -13,6 +13,7 @@ logger = get_logger(__name__)
 # Global singletons (avoid duplicate strategy threads).
 _trading_executor = None
 _pending_order_worker = None
+_reflection_worker = None
 
 
 def get_trading_executor():
@@ -31,6 +32,39 @@ def get_pending_order_worker():
         from app.services.pending_order_worker import PendingOrderWorker
         _pending_order_worker = PendingOrderWorker()
     return _pending_order_worker
+
+
+def get_reflection_worker():
+    """Get the reflection verification worker singleton."""
+    global _reflection_worker
+    if _reflection_worker is None:
+        from app.services.agents.reflection_worker import ReflectionWorker
+        _reflection_worker = ReflectionWorker()
+    return _reflection_worker
+
+
+def start_reflection_worker():
+    """
+    Start the reflection worker if enabled.
+
+    To enable it, set ENABLE_REFLECTION_WORKER=true.
+    """
+    import os
+    enabled = os.getenv("ENABLE_REFLECTION_WORKER", "false").lower() == "true"
+    if not enabled:
+        logger.info("Reflection worker is disabled. Set ENABLE_REFLECTION_WORKER=true to enable.")
+        return
+
+    # Avoid running twice with Flask reloader
+    debug = os.getenv("PYTHON_API_DEBUG", "false").lower() == "true"
+    if debug:
+        if os.environ.get("WERKZEUG_RUN_MAIN") != "true":
+            return
+
+    try:
+        get_reflection_worker().start()
+    except Exception as e:
+        logger.error(f"Failed to start reflection worker: {e}")
 
 
 def start_pending_order_worker():
@@ -128,6 +162,7 @@ def create_app(config_name='default'):
     # Startup hooks.
     with app.app_context():
         start_pending_order_worker()
+        start_reflection_worker()
         restore_running_strategies()
     
     return app

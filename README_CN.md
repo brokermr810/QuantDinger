@@ -117,6 +117,113 @@
 - **加密/股票智能体**：专注于特定市场的技术和资金流向分析。
 - **报告生成**：自动产出结构化的日报/周报。
 
+### 2.1 🧠 AI 记忆增强系统（Memory-Augmented Agents）
+QuantDinger 的多智能体不是“每次从零开始”。它内置了一个**本地记忆库 + 反思闭环**，让每个智能体在生成提示词（prompt）时能检索过往经验，并在事后验证/复盘后把结果写回记忆库。
+
+- **本质**：RAG 风格的“经验检索增强”，**不是**训练/微调模型权重（零外部向量库依赖）。
+- **隐私**：所有记忆与反思记录默认落盘在本地 SQLite：`backend_api_python/data/memory/`。
+
+#### 逻辑图（从请求到记忆闭环）
+
+```mermaid
+flowchart TD
+  A[POST /api/analysis/multi] --> B[AnalysisService]
+  B --> C[AgentCoordinator]
+
+  C --> D[构建上下文: price/kline/news/indicators]
+
+  subgraph Agents[多智能体并行/串行工作流]
+    E1[MarketAnalyst]
+    E2[FundamentalAnalyst]
+    E3[NewsAnalyst]
+    E4[SentimentAnalyst]
+    E5[RiskAnalyst]
+    F1[BullResearcher]
+    F2[BearResearcher]
+    G[TraderAgent]
+  end
+
+  C -->|Phase 1 并行| E1
+  C -->|Phase 1 并行| E2
+  C -->|Phase 1 并行| E3
+  C -->|Phase 1 并行| E4
+  C -->|Phase 1 并行| E5
+  C -->|Phase 2 并行| F1
+  C -->|Phase 2 并行| F2
+  C -->|Phase 3| G
+
+  subgraph MemDB[本地 SQLite 记忆库（按角色拆分）]
+    M1[(data/memory/market_analyst_memory.db)]
+    M2[(data/memory/fundamental_analyst_memory.db)]
+    M3[(data/memory/news_analyst_memory.db)]
+    M4[(data/memory/sentiment_analyst_memory.db)]
+    M5[(data/memory/risk_analyst_memory.db)]
+    M6[(data/memory/bull_researcher_memory.db)]
+    M7[(data/memory/bear_researcher_memory.db)]
+    M8[(data/memory/trader_agent_memory.db)]
+  end
+
+  E1 <-->|get_memories / add_memory| M1
+  E2 <-->|get_memories / add_memory| M2
+  E3 <-->|get_memories / add_memory| M3
+  E4 <-->|get_memories / add_memory| M4
+  E5 <-->|get_memories / add_memory| M5
+  F1 <-->|get_memories / add_memory| M6
+  F2 <-->|get_memories / add_memory| M7
+  G  <-->|get_memories / add_memory| M8
+
+  C --> R[ReflectionService.record_analysis]
+  R --> RR[(data/memory/reflection_records.db)]
+  W[ReflectionWorker（可选，定时）] --> RR
+  W -->|到期验证 + 写回经验| M8
+  A2[POST /api/analysis/reflect（手动复盘）] -->|reflect_and_learn| M8
+```
+
+#### 1) 记忆是如何“注入提示词”的？
+每个 agent 在 `analyze()` 时会：
+- **构造 situation**：例如 `"{market}:{symbol} fundamental analysis"`、`"{market}:{symbol} trading decision"` 等
+- **携带结构化 metadata**：`market/symbol/timeframe` + `memory_features`（价格、涨跌幅、技术指标等）
+- **检索 Top-K 历史经验**：转成一段可读的 `memory_prompt`
+- **拼进 system_prompt**：模型在做本次分析前先“读历史经验”
+
+你可以在这些文件里看到同样的模式：
+- `backend_api_python/app/services/agents/base_agent.py`：`get_memories()` + `format_memories_for_prompt()`
+- `backend_api_python/app/services/agents/*_agents.py`、`trader_agent.py`：把 `memory_prompt` 拼进 system prompt
+
+#### 2) 记忆检索算法（为什么“像”RAG？）
+每个角色的记忆表保存（简化）：
+- **situation / recommendation / result / returns**
+- **market / symbol / timeframe / features_json**
+- **embedding（可选 BLOB）**：本地“哈希向量”嵌入（无外部依赖）
+
+检索时会从最近 `AGENT_MEMORY_CANDIDATE_LIMIT` 条候选中打分排序：
+\[
+score = w_{sim}\cdot sim + w_{recency}\cdot recency + w_{returns}\cdot returns\_score
+\]
+
+- **sim**：默认用 embedding cosine，相同维度的本地哈希向量；没有 embedding 时退化为 difflib 文本相似度
+- **recency**：半衰期衰减（`AGENT_MEMORY_HALF_LIFE_DAYS`）
+- **returns_score**：对收益做 `tanh` 压缩，避免极值支配排序
+- **timeframe 惩罚**：如果查询 timeframe 与记忆记录 timeframe 不一致，会额外扣分
+
+#### 3) “学习”从哪里来？（两条写入通道）
+- **自动反思（可选）**：
+  - 分析结束后，系统会把 BUY/SELL/HOLD 记录到 `reflection_records.db`
+  - 开启 `ENABLE_REFLECTION_WORKER=true` 后，后台线程会按 `REFLECTION_WORKER_INTERVAL_SEC` 轮询到期记录，拉取最新价格做验证，并把验证结果写回 `trader_agent_memory.db`
+- **手动复盘（推荐）**：
+  - 调用 `POST /api/analysis/reflect`，把你的真实交易结果（returns/result）写回记忆库，用于后续决策增强
+
+#### 4) 关键环境变量（`.env`）
+- **ENABLE_AGENT_MEMORY**：是否启用记忆增强（默认 true）
+- **AGENT_MEMORY_TOP_K**：每次注入的经验条数（默认 5）
+- **AGENT_MEMORY_CANDIDATE_LIMIT**：候选池大小（默认 500）
+- **AGENT_MEMORY_ENABLE_VECTOR**：是否启用 embedding cosine（默认 true；否则退化为文本相似）
+- **AGENT_MEMORY_EMBEDDING_DIM**：哈希 embedding 维度（默认 256）
+- **AGENT_MEMORY_HALF_LIFE_DAYS**：时间衰减半衰期（默认 30）
+- **AGENT_MEMORY_W_SIM / W_RECENCY / W_RETURNS**：三项权重（默认 0.75 / 0.20 / 0.05）
+- **ENABLE_REFLECTION_WORKER**：是否启用自动验证闭环（默认 false）
+- **REFLECTION_WORKER_INTERVAL_SEC**：自动验证周期（默认 86400 秒）
+
 ### 3. 稳健的策略运行时
 - **基于线程的执行器**：独立的线程池管理策略执行。
 - **自动恢复**：系统重启后自动恢复运行中的策略。
@@ -277,9 +384,8 @@ docker-compose down -v
 
 ```yaml
 volumes:
-  - ./backend_api_python/quantdinger.db:/app/quantdinger.db   # 数据库
   - ./backend_api_python/logs:/app/logs                       # 日志
-  - ./backend_api_python/data:/app/data                       # 数据目录
+  - ./backend_api_python/data:/app/data                       # 数据目录（包含 quantdinger.db）
   - ./backend_api_python/.env:/app/.env                       # 配置文件
 ```
 

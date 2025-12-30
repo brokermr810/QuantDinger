@@ -117,6 +117,48 @@
 - **暗号資産/株式エージェント**: 特定の市場のテクニカル分析と資金フロー分析に特化しています。
 - **レポート生成**: 構造化された日次/週次リサーチレポートを自動的に作成します。
 
+### 2.1 🧠 記憶拡張エージェント（Memory-Augmented Agents）
+QuantDinger のエージェントは毎回「ゼロから」ではありません。バックエンドに **ローカル記憶DB + 反省（検証）ループ** を内蔵し、過去の経験を検索して system prompt に注入します（RAG 風）。
+
+- **これは何か**：経験検索によるプロンプト拡張（※モデルの学習/微調整ではありません）
+- **保存先**：ローカル SQLite（`backend_api_python/data/memory/`）
+
+#### フロー図（リクエスト → 記憶閉ループ）
+
+```mermaid
+flowchart TD
+  A[POST /api/analysis/multi] --> B[AnalysisService]
+  B --> C[AgentCoordinator]
+  C --> D[コンテキスト構築: price/kline/news/indicators]
+
+  subgraph Agents[Agents]
+    E[Analysts + Researchers + Trader]
+  end
+
+  C --> E
+  E -->|get_memories / add_memory| M[(SQLite: data/memory/*_memory.db)]
+  C --> R[ReflectionService.record_analysis]
+  R --> RR[(SQLite: data/memory/reflection_records.db)]
+  W[ReflectionWorker（任意）] --> RR
+  W -->|期限到来を検証し学習| M
+  A2[POST /api/analysis/reflect] -->|手動で学習| M
+```
+
+#### 検索ランキング（簡略）
+\[
+score = w_{sim}\cdot sim + w_{recency}\cdot recency + w_{returns}\cdot returns\_score
+\]
+
+#### 学習の入口
+- **手動復習（推奨）**：`POST /api/analysis/reflect` で実際の結果（returns/result）を記憶へ
+- **自動検証（任意）**：`ENABLE_REFLECTION_WORKER=true`、`REFLECTION_WORKER_INTERVAL_SEC` で定期検証→記憶へ反映
+
+#### 主な環境変数（`.env`）
+- `ENABLE_AGENT_MEMORY`, `AGENT_MEMORY_TOP_K`, `AGENT_MEMORY_CANDIDATE_LIMIT`
+- `AGENT_MEMORY_ENABLE_VECTOR`, `AGENT_MEMORY_EMBEDDING_DIM`
+- `AGENT_MEMORY_HALF_LIFE_DAYS`, `AGENT_MEMORY_W_SIM`, `AGENT_MEMORY_W_RECENCY`, `AGENT_MEMORY_W_RETURNS`
+- `ENABLE_REFLECTION_WORKER`, `REFLECTION_WORKER_INTERVAL_SEC`
+
 ### 3. 堅牢な戦略ランタイム
 - **スレッドベースのエグゼキューター**: 戦略実行のための独立したスレッドプール管理。
 - **自動復元**: システム再起動後に実行中の戦略を自動的に再開します。
@@ -263,9 +305,8 @@ docker-compose down -v
 
 ```yaml
 volumes:
-  - ./backend_api_python/quantdinger.db:/app/quantdinger.db   # データベース
   - ./backend_api_python/logs:/app/logs                       # ログ
-  - ./backend_api_python/data:/app/data                       # データディレクトリ
+  - ./backend_api_python/data:/app/data                       # データディレクトリ（quantdinger.db を含む）
   - ./backend_api_python/.env:/app/.env                       # 設定ファイル
 ```
 

@@ -117,6 +117,48 @@
 - **암호화폐/주식 에이전트**: 특정 시장에 대한 기술적 분석 및 자금 흐름 분석을 전문으로 합니다.
 - **보고서 생성**: 구조화된 일일/주간 리서치 보고서를 자동으로 생성합니다.
 
+### 2.1 🧠 메모리 증강 에이전트(Memory-Augmented Agents)
+QuantDinger의 에이전트는 매번 “처음부터” 시작하지 않습니다. 백엔드에는 **로컬 메모리 DB + 리플렉션(검증) 루프**가 내장되어 있어, 과거 경험을 검색해 system prompt에 주입하는 RAG 스타일의 강화가 동작합니다.
+
+- **무엇인가**: 경험 검색 기반 프롬프트 강화(모델 파인튜닝/학습이 아님)
+- **저장 위치**: 로컬 SQLite (`backend_api_python/data/memory/`)
+
+#### 흐름도(요청 → 메모리 폐루프)
+
+```mermaid
+flowchart TD
+  A[POST /api/analysis/multi] --> B[AnalysisService]
+  B --> C[AgentCoordinator]
+  C --> D[컨텍스트 구성: price/kline/news/indicators]
+
+  subgraph Agents[Agents]
+    E[Analysts + Researchers + Trader]
+  end
+
+  C --> E
+  E -->|get_memories / add_memory| M[(SQLite: data/memory/*_memory.db)]
+  C --> R[ReflectionService.record_analysis]
+  R --> RR[(SQLite: data/memory/reflection_records.db)]
+  W[ReflectionWorker(옵션)] --> RR
+  W -->|만기 검증 + 학습 반영| M
+  A2[POST /api/analysis/reflect] -->|수동 학습| M
+```
+
+#### 검색 랭킹(간략)
+\[
+score = w_{sim}\cdot sim + w_{recency}\cdot recency + w_{returns}\cdot returns\_score
+\]
+
+#### 학습 경로
+- **수동 회고(추천)**: `POST /api/analysis/reflect`로 실제 결과(returns/result)를 메모리에 기록
+- **자동 검증(옵션)**: `ENABLE_REFLECTION_WORKER=true`, `REFLECTION_WORKER_INTERVAL_SEC`로 주기적 검증→메모리 반영
+
+#### 주요 환경 변수(`.env`)
+- `ENABLE_AGENT_MEMORY`, `AGENT_MEMORY_TOP_K`, `AGENT_MEMORY_CANDIDATE_LIMIT`
+- `AGENT_MEMORY_ENABLE_VECTOR`, `AGENT_MEMORY_EMBEDDING_DIM`
+- `AGENT_MEMORY_HALF_LIFE_DAYS`, `AGENT_MEMORY_W_SIM`, `AGENT_MEMORY_W_RECENCY`, `AGENT_MEMORY_W_RETURNS`
+- `ENABLE_REFLECTION_WORKER`, `REFLECTION_WORKER_INTERVAL_SEC`
+
 ### 3. 강력한 전략 런타임
 - **스레드 기반 실행기**: 전략 실행을 위한 독립적인 스레드 풀 관리.
 - **자동 복구**: 시스템 재시작 후 실행 중인 전략을 자동으로 재개합니다.
@@ -276,9 +318,8 @@ docker-compose down -v
 
 ```yaml
 volumes:
-  - ./backend_api_python/quantdinger.db:/app/quantdinger.db   # 데이터베이스
   - ./backend_api_python/logs:/app/logs                       # 로그
-  - ./backend_api_python/data:/app/data                       # 데이터 디렉토리
+  - ./backend_api_python/data:/app/data                       # 데이터 디렉토리(quantdinger.db 포함)
   - ./backend_api_python/.env:/app/.env                       # 구성 파일
 ```
 

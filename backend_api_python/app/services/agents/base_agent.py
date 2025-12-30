@@ -3,6 +3,7 @@
 """
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, List
+import os
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -36,7 +37,7 @@ class BaseAgent(ABC):
         """
         pass
     
-    def get_memories(self, situation: str, n_matches: int = 2) -> List[Dict[str, Any]]:
+    def get_memories(self, situation: str, n_matches: Optional[int] = None, metadata: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """
         从记忆中检索相似情况
         
@@ -47,8 +48,17 @@ class BaseAgent(ABC):
         Returns:
             匹配的历史记录列表
         """
+        if n_matches is None:
+            try:
+                n_matches = int(os.getenv("AGENT_MEMORY_TOP_K", "5") or 5)
+            except Exception:
+                n_matches = 5
         if self.memory:
-            return self.memory.get_memories(situation, n_matches=n_matches)
+            # New memory API supports metadata; older implementations will ignore extra args.
+            try:
+                return self.memory.get_memories(situation, n_matches=n_matches, metadata=metadata)
+            except TypeError:
+                return self.memory.get_memories(situation, n_matches=n_matches)
         return []
     
     def format_memories_for_prompt(self, memories: List[Dict[str, Any]]) -> str:
@@ -62,10 +72,25 @@ class BaseAgent(ABC):
             格式化的字符串
         """
         if not memories:
-            return "无历史经验可参考。"
-        
-        formatted = "历史经验参考：\n"
+            return "No prior experience available."
+
+        lines = ["Prior experience (most relevant first):"]
         for i, mem in enumerate(memories, 1):
-            formatted += f"{i}. {mem.get('recommendation', 'N/A')}\n"
-        
-        return formatted
+            rec = mem.get("recommendation") or "N/A"
+            res = mem.get("result") or ""
+            ret = mem.get("returns")
+            created_at = mem.get("created_at")
+            # Keep created_at as-is (SQLite string), but include it for traceability.
+            meta_bits = []
+            if created_at:
+                meta_bits.append(f"at {created_at}")
+            if ret is not None and ret != "":
+                meta_bits.append(f"returns={ret}%")
+            meta_s = f" ({', '.join(meta_bits)})" if meta_bits else ""
+
+            if res:
+                lines.append(f"{i}. {rec}{meta_s}\n   outcome: {res}")
+            else:
+                lines.append(f"{i}. {rec}{meta_s}")
+
+        return "\n".join(lines)

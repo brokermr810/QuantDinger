@@ -117,6 +117,76 @@
 - **加密/股票智能體**：專注於特定市場的技術和資金流向分析。
 - **報告生成**：自動產出結構化的日報/週報。
 
+### 2.1 🧠 AI 記憶增強系統（Memory-Augmented Agents）
+QuantDinger 的多智能體不是「每次從零開始」。後端內建**本地記憶庫 + 反思閉環**：在生成提示詞（prompt）時檢索過往經驗並注入到 system prompt，並可在事後驗證/復盤後把結果寫回記憶庫。
+
+- **本質**：RAG 風格「經驗檢索增強」，**不是**訓練/微調模型權重（零外部向量庫依賴）。
+- **隱私**：所有記憶與反思記錄預設落盤在本地 SQLite：`backend_api_python/data/memory/`。
+
+#### 邏輯圖（從請求到記憶閉環）
+
+```mermaid
+flowchart TD
+  A[POST /api/analysis/multi] --> B[AnalysisService]
+  B --> C[AgentCoordinator]
+
+  C --> D[建構上下文: price/kline/news/indicators]
+
+  subgraph Agents[多智能體並行/串行工作流]
+    E1[MarketAnalyst]
+    E2[FundamentalAnalyst]
+    E3[NewsAnalyst]
+    E4[SentimentAnalyst]
+    E5[RiskAnalyst]
+    F1[BullResearcher]
+    F2[BearResearcher]
+    G[TraderAgent]
+  end
+
+  C -->|Phase 1 並行| E1
+  C -->|Phase 1 並行| E2
+  C -->|Phase 1 並行| E3
+  C -->|Phase 1 並行| E4
+  C -->|Phase 1 並行| E5
+  C -->|Phase 2 並行| F1
+  C -->|Phase 2 並行| F2
+  C -->|Phase 3| G
+
+  subgraph MemDB[本地 SQLite 記憶庫（按角色拆分）]
+    M1[(data/memory/*_memory.db)]
+  end
+
+  E1 <-->|get_memories / add_memory| M1
+  E2 <-->|get_memories / add_memory| M1
+  E3 <-->|get_memories / add_memory| M1
+  E4 <-->|get_memories / add_memory| M1
+  E5 <-->|get_memories / add_memory| M1
+  F1 <-->|get_memories / add_memory| M1
+  F2 <-->|get_memories / add_memory| M1
+  G  <-->|get_memories / add_memory| M1
+
+  C --> R[ReflectionService.record_analysis]
+  R --> RR[(data/memory/reflection_records.db)]
+  W[ReflectionWorker（可選，定時）] --> RR
+  W -->|到期驗證 + 寫回經驗| M1
+  A2[POST /api/analysis/reflect（手動復盤）] -->|reflect_and_learn| M1
+```
+
+#### 檢索排序（簡化）
+\[
+score = w_{sim}\cdot sim + w_{recency}\cdot recency + w_{returns}\cdot returns\_score
+\]
+
+#### 兩條「學習」通道
+- **手動復盤（推薦）**：`POST /api/analysis/reflect` 寫入真實交易結果（returns/result）
+- **自動反思（可選）**：`ENABLE_REFLECTION_WORKER=true` 後，背景任務按 `REFLECTION_WORKER_INTERVAL_SEC` 驗證到期記錄並寫回記憶
+
+#### 关键環境變量（`.env`）
+- `ENABLE_AGENT_MEMORY`, `AGENT_MEMORY_TOP_K`, `AGENT_MEMORY_CANDIDATE_LIMIT`
+- `AGENT_MEMORY_ENABLE_VECTOR`, `AGENT_MEMORY_EMBEDDING_DIM`
+- `AGENT_MEMORY_HALF_LIFE_DAYS`, `AGENT_MEMORY_W_SIM`, `AGENT_MEMORY_W_RECENCY`, `AGENT_MEMORY_W_RETURNS`
+- `ENABLE_REFLECTION_WORKER`, `REFLECTION_WORKER_INTERVAL_SEC`
+
 ### 3. 穩健的策略運行時
 - **基於線程的執行器**：獨立的線程池管理策略執行。
 - **自動恢復**：系統重啟後自動恢復運行中的策略。
@@ -277,9 +347,8 @@ docker-compose down -v
 
 ```yaml
 volumes:
-  - ./backend_api_python/quantdinger.db:/app/quantdinger.db   # 數據庫
   - ./backend_api_python/logs:/app/logs                       # 日誌
-  - ./backend_api_python/data:/app/data                       # 數據目錄
+  - ./backend_api_python/data:/app/data                       # 數據目錄（包含 quantdinger.db）
   - ./backend_api_python/.env:/app/.env                       # 配置文件
 ```
 

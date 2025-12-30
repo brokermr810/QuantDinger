@@ -83,6 +83,7 @@ def multi_analysis():
         language = detect_request_language(request, body=data, default='en-US')
         model = data.get('model', None)
         use_multi_agent = data.get('use_multi_agent', None)  # None -> use backend default
+        timeframe = data.get('timeframe', '1D')
         
         if not symbol or not market:
             return jsonify({
@@ -101,7 +102,7 @@ def multi_analysis():
         
         # Create analysis service instance (local-only; no paid credits)
         service = AnalysisService(use_multi_agent=use_multi_agent)
-        result = service.analyze(market, symbol, language, model=model)
+        result = service.analyze(market, symbol, language, model=model, timeframe=timeframe)
 
         # Persist as "completed" history (no paid credits in local mode).
         task_id = _store_task(market, symbol, model or '', language, 'completed', result=result, error_message='')
@@ -247,13 +248,14 @@ def stream_analysis():
         symbol = data.get('symbol', '')
         language = detect_request_language(request, body=data, default='en-US')
         use_multi_agent = data.get('use_multi_agent', None)
+        timeframe = data.get('timeframe', '1D')
         
         def generate():
             try:
                 yield f"data: {json.dumps({'status': 'started', 'message': 'Analysis started'})}\n\n"
                 
                 service = AnalysisService(use_multi_agent=use_multi_agent)
-                result = service.analyze(market, symbol, language)
+                result = service.analyze(market, symbol, language, timeframe=timeframe)
                 
                 yield f"data: {json.dumps({'status': 'completed', 'data': result})}\n\n"
             except Exception as e:

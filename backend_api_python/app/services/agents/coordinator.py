@@ -97,7 +97,7 @@ class AgentCoordinator:
         self.neutral_analyst = NeutralAnalyst()
         self.safe_analyst = SafeAnalyst()
     
-    def run_analysis(self, market: str, symbol: str, language: str = 'zh-CN', model: str = None) -> Dict[str, Any]:
+    def run_analysis(self, market: str, symbol: str, language: str = 'zh-CN', model: str = None, timeframe: str = "1D") -> Dict[str, Any]:
         """
         Run the full multi-agent analysis workflow.
         """
@@ -111,9 +111,13 @@ class AgentCoordinator:
         current_price = tools.get_current_price(market, symbol)
         company_data = tools.get_company_data(market, symbol, language=language)
         
+        # Normalize timeframe
+        tf = (timeframe or "1D").strip()
+
         # 2) Kline + fundamentals
-        kline_data = tools.get_stock_data(market, symbol, days=30)
+        kline_data = tools.get_stock_data(market, symbol, days=30, timeframe=tf)
         fundamental_data = tools.get_fundamental_data(market, symbol)
+        indicators = tools.calculate_technical_indicators(kline_data or [])
         
         # 3) News (Finnhub + web search)
         company_name = company_data.get('name', symbol) if company_data else symbol
@@ -127,6 +131,7 @@ class AgentCoordinator:
             "fundamental_data": fundamental_data,
             "company_data": company_data,
             "news_data": news_data,
+            "indicators": indicators,
         }
         
         context = {
@@ -134,6 +139,14 @@ class AgentCoordinator:
             "symbol": symbol,
             "language": language,
             "model": model,
+            "timeframe": tf,
+            # Compact structured features for memory retrieval.
+            "memory_features": {
+                "timeframe": tf,
+                "price": (current_price or {}).get("price"),
+                "changePercent": (current_price or {}).get("changePercent"),
+                "indicators": indicators,
+            },
             "base_data": base_data
         }
         
@@ -492,7 +505,18 @@ class AgentCoordinator:
             # Update trader memory
             if 'trader' in self.memories:
                 self.memories['trader'].add_memory(
-                    situation, recommendation, result, returns
+                    situation,
+                    recommendation,
+                    result,
+                    returns,
+                    metadata={
+                        "market": market,
+                        "symbol": symbol,
+                        "timeframe": None,
+                        "features": {
+                            "source": "manual_reflect",
+                        }
+                    },
                 )
             
             logger.info(f"Reflection completed: {market}:{symbol}, decision={decision}, returns={returns}")

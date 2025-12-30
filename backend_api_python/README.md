@@ -80,9 +80,22 @@ Default address: `http://localhost:5000`
 
 ## Database (SQLite)
 
-- Default file: `backend_api_python/quantdinger.db` (override via `SQLITE_DATABASE_FILE`)
+- Default file: `backend_api_python/data/quantdinger.db` (override via `SQLITE_DATABASE_FILE`)
 - Tables are created/updated automatically on startup (see `app/utils/db.py`)
 - `qd_addon_config` exists for backward compatibility, but **this backend reads secrets from `.env` / OS env**, not from the database (see `app/utils/config_loader.py`)
+
+## AI memory augmentation (local-only)
+
+This backend includes a lightweight, privacy-first **memory-augmented multi-agent** system:
+
+- Memory DBs (per role): `backend_api_python/data/memory/*_memory.db`
+- Reflection DB (optional auto-verify loop): `backend_api_python/data/memory/reflection_records.db`
+- API hooks:
+  - `POST /api/analysis/multi` (main entry)
+  - `POST /api/analysis/reflect` (manual learn from post-trade outcomes)
+- Controls: see `.env` / `env.example`:
+  - `ENABLE_AGENT_MEMORY`, `AGENT_MEMORY_*`
+  - `ENABLE_REFLECTION_WORKER`, `REFLECTION_WORKER_INTERVAL_SEC`
 
 ## Frontend integration (Vue dev server)
 

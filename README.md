@@ -117,6 +117,42 @@ Your tireless team of analysts:
 - **Crypto/Stock Agent**: Specializes in technical and capital flow analysis for specific markets.
 - **Report Generation**: Automatically produces structured Daily/Weekly research reports.
 
+### 2.1 🧠 Memory-Augmented Agents (Local RAG + Reflection Loop)
+QuantDinger’s agents don’t start from scratch every time. The backend includes a **local memory store** and an optional **reflection/verification loop**:
+
+- **What it is**: RAG-style experience retrieval injected into agent prompts (NOT model fine-tuning).
+- **Where it lives**: Local SQLite files under `backend_api_python/data/memory/` (privacy-first).
+
+```mermaid
+flowchart TD
+  A[POST /api/analysis/multi] --> B[AnalysisService]
+  B --> C[AgentCoordinator]
+  C --> D[Build context: price/kline/news/indicators]
+
+  subgraph Agents[Agents]
+    E[Analysts + Researchers + Trader]
+  end
+
+  C --> E
+  E -->|get_memories()| M[(SQLite: role_memory.db)]
+  M -->|Top-K memories| E
+  E -->|memory_prompt injected into system prompt| LLM[LLMService (OpenRouter)]
+
+  C --> R[ReflectionService.record_analysis]
+  R --> RR[(SQLite: reflection_records.db)]
+  W[ReflectionWorker (optional)] --> RR
+  W -->|auto-verify + learn| M
+  A2[POST /api/analysis/reflect] -->|manual learn| M
+```
+
+**Retrieval ranking (simplified)**:
+
+\[
+score = w_{sim}\cdot sim + w_{recency}\cdot recency + w_{returns}\cdot returns\_score
+\]
+
+Config lives in `.env` (see `backend_api_python/env.example`): `ENABLE_AGENT_MEMORY`, `AGENT_MEMORY_TOP_K`, `AGENT_MEMORY_ENABLE_VECTOR`, `AGENT_MEMORY_HALF_LIFE_DAYS`, and `ENABLE_REFLECTION_WORKER`.
+
 ### 3. Robust Strategy Runtime
 - **Thread-Based Executor**: Independent thread pool management for strategy execution.
 - **Auto-Restore**: Automatically resumes running strategies after system restarts.
@@ -471,7 +507,7 @@ Use `backend_api_python/env.example` as a template. Common settings include:
 
 - **Auth**: `SECRET_KEY`, `ADMIN_USER`, `ADMIN_PASSWORD`
 - **Server**: `PYTHON_API_HOST`, `PYTHON_API_PORT`, `PYTHON_API_DEBUG`
-- **Database**: `SQLITE_DATABASE_FILE` (optional; default is `backend_api_python/quantdinger.db`)
+- **Database**: `SQLITE_DATABASE_FILE` (optional; default is `backend_api_python/data/quantdinger.db`)
 - **AI / LLM**: `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, timeouts
 - **Web search**: `SEARCH_PROVIDER`, `SEARCH_GOOGLE_*`, `SEARCH_BING_API_KEY`
 - **Proxy (optional)**: `PROXY_PORT` or `PROXY_URL`

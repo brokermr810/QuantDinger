@@ -38,7 +38,13 @@ class TraderAgent(BaseAgent):
         
         # Memory
         situation = f"{market}:{symbol} trading decision"
-        memories = self.get_memories(situation, n_matches=2)
+        memory_meta = {
+            "market": market,
+            "symbol": symbol,
+            "timeframe": context.get("timeframe"),
+            "features": context.get("memory_features") or {},
+        }
+        memories = self.get_memories(situation, n_matches=None, metadata=memory_meta)
         memory_prompt = self.format_memories_for_prompt(memories)
         
         lang_instruction = self._get_language_instruction(language)

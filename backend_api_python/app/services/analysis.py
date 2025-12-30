@@ -37,8 +37,10 @@ class AnalysisService:
             
             # Lazy import to avoid circular imports
             from app.services.agents.coordinator import AgentCoordinator
+            import os
+            enable_memory = os.getenv("ENABLE_AGENT_MEMORY", "true").lower() == "true"
             self.coordinator = AgentCoordinator(
-                enable_memory=True,
+                enable_memory=enable_memory,
                 max_debate_rounds=2
             )
             logger.info("Multi-agent coordinator initialized")
@@ -50,7 +52,7 @@ class AnalysisService:
         finally:
             AnalysisService._initializing = False
 
-    def analyze(self, market: str, symbol: str, language: str = 'en-US', model: str = None) -> Dict[str, Any]:
+    def analyze(self, market: str, symbol: str, language: str = 'en-US', model: str = None, timeframe: str = "1D") -> Dict[str, Any]:
         """
         Args:
             market: Market (AShare, USStock, HShare, Crypto, Forex, Futures)
@@ -79,7 +81,7 @@ class AnalysisService:
 
         try:
             logger.info(f"Run coordinator: {market}:{symbol}")
-            agent_result = self.coordinator.run_analysis(market, symbol, language, model=model)
+            agent_result = self.coordinator.run_analysis(market, symbol, language, model=model, timeframe=timeframe)
             
             logger.info(f"Coordinator result keys: {list(agent_result.keys())}")
             

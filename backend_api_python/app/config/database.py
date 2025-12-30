@@ -51,9 +51,9 @@ class MetaSQLiteConfig(type):
     
     @property
     def DATABASE_FILE(cls):
-        # 默认放在 backend_api_python 根目录
+        # 默认放在 backend_api_python/data 目录（更干净，也与 docker-compose 挂载一致）
         base_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        default_path = os.path.join(base_dir, 'quantdinger.db')
+        default_path = os.path.join(base_dir, 'data', 'quantdinger.db')
         return os.getenv('SQLITE_DATABASE_FILE', default_path)
 
 
