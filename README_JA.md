@@ -41,8 +41,8 @@
   </p>
 
   <p align="center">
-    <a href="https://t.me/+ULKYtlLEE9M4ZWZl"><img src="https://img.shields.io/badge/Telegram-QuantDinger%20Group-26A5E4?style=for-the-badge&logo=telegram" alt="Telegram Group"></a>
-    <a href="https://discord.gg/cn6HVE2KC"><img src="https://img.shields.io/badge/Discord-Join%20Server-5865F2?style=for-the-badge&logo=discord" alt="Discord"></a>
+    <a href="https://t.me/quantdinger"><img src="https://img.shields.io/badge/Telegram-QuantDinger%20Group-26A5E4?style=for-the-badge&logo=telegram" alt="Telegram Group"></a>
+    <a href="https://discord.gg/vwJ8zxFh9Q"><img src="https://img.shields.io/badge/Discord-Join%20Server-5865F2?style=for-the-badge&logo=discord" alt="Discord"></a>
     <a href="https://x.com/HenryCryption"><img src="https://img.shields.io/badge/X-Follow%20Us-000000?style=for-the-badge&logo=x" alt="X"></a>
   </p>
 </div>
@@ -419,8 +419,8 @@ npm run serve
 
 戦略の共有や技術サポートのために、グローバルコミュニティに参加しましょう：
 
-- **Telegram (Group)**: [Join QuantDinger Telegram Group](https://t.me/+ULKYtlLEE9M4ZWZl)
-- **Discord**: [サーバーに参加](https://discord.gg/cn6HVE2KC)
+- **Telegram (Group)**: [Join QuantDinger Telegram Group](https://t.me/quantdinger)
+- **Discord**: [サーバーに参加](https://discord.gg/vwJ8zxFh9Q)
 - **YouTube**: [@quantdinger](https://youtube.com/@quantdinger)
 - **Email**: [brokermr810@gmail.com](mailto:brokermr810@gmail.com)
 - **GitHub Issues**: [バグ報告 / 機能リクエスト](https://github.com/brokermr810/QuantDinger/issues)
@@ -453,7 +453,7 @@ QuantDingerを最大限に活用するためのプロフェッショナルサー
 
 **ご興味がありますか？** 以下よりお問い合わせください：
 - 📧 Email: [brokermr810@gmail.com](mailto:brokermr810@gmail.com)
-- 💬 Telegram: [QuantDinger Group](https://t.me/+ULKYtlLEE9M4ZWZl)
+- 💬 Telegram: [QuantDinger Group](https://t.me/quantdinger)
 
 ---
 

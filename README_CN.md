@@ -41,8 +41,8 @@
   </p>
 
   <p align="center">
-    <a href="https://t.me/+ULKYtlLEE9M4ZWZl"><img src="https://img.shields.io/badge/Telegram-QuantDinger%20Group-26A5E4?style=for-the-badge&logo=telegram" alt="Telegram Group"></a>
-    <a href="https://discord.gg/cn6HVE2KC"><img src="https://img.shields.io/badge/Discord-Join%20Server-5865F2?style=for-the-badge&logo=discord" alt="Discord"></a>
+    <a href="https://t.me/quantdinger"><img src="https://img.shields.io/badge/Telegram-QuantDinger%20Group-26A5E4?style=for-the-badge&logo=telegram" alt="Telegram Group"></a>
+    <a href="https://discord.gg/vwJ8zxFh9Q"><img src="https://img.shields.io/badge/Discord-Join%20Server-5865F2?style=for-the-badge&logo=discord" alt="Discord"></a>
     <a href="https://x.com/HenryCryption"><img src="https://img.shields.io/badge/X-Follow%20Us-000000?style=for-the-badge&logo=x" alt="X"></a>
   </p>
 </div>
@@ -463,8 +463,8 @@ npm run serve
 
 加入我们的全球社区进行策略分享和技术支持：
 
-- **Telegram (Group)**: [Join QuantDinger Telegram Group](https://t.me/+ULKYtlLEE9M4ZWZl)
-- **Discord**: [Join Server](https://discord.gg/cn6HVE2KC)
+- **Telegram (Group)**: [Join QuantDinger Telegram Group](https://t.me/quantdinger)
+- **Discord**: [Join Server](https://discord.gg/vwJ8zxFh9Q)
 - **YouTube**: [@quantdinger](https://youtube.com/@quantdinger)
 - **Email**: [brokermr810@gmail.com](mailto:brokermr810@gmail.com)
 - **GitHub Issues**: [提交 Bug / 功能请求](https://github.com/brokermr810/QuantDinger/issues)
@@ -497,7 +497,7 @@ npm run serve
 
 **感兴趣？** 联系我们：
 - 📧 Email: [brokermr810@gmail.com](mailto:brokermr810@gmail.com)
-- 💬 Telegram: [QuantDinger Group](https://t.me/+ULKYtlLEE9M4ZWZl)
+- 💬 Telegram: [QuantDinger Group](https://t.me/quantdinger)
 
 ---
 
