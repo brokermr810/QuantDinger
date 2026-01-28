@@ -169,20 +169,36 @@ class PendingOrderWorker:
                 if market_type in ("futures", "future", "perp", "perpetual"):
                     market_type = "swap"
 
-                client = create_client(exchange_config, market_type=market_type)
+                # Lazy import MT5 here to allow elif chain later
+                global MT5Client
+                if MT5Client is None:
+                    try:
+                        from app.services.mt5_trading import MT5Client as _MT5Client
+                        MT5Client = _MT5Client
+                    except ImportError:
+                        pass
 
+                client = create_client(exchange_config, market_type=market_type)
+                
                 # Build an "exchange snapshot" per symbol+side
                 exch_size: Dict[str, Dict[str, float]] = {}  # {symbol: {long: size, short: size}}
+                exch_entry_price: Dict[str, Dict[str, float]] = {} # {symbol: {long: px, short: px}}
 
                 if isinstance(client, BinanceFuturesClient) and market_type == "swap":
                     all_pos = client.get_positions() or []
+                    # Handle dict response if needed (wrapper)
+                    if isinstance(all_pos, dict) and "raw" in all_pos:
+                         all_pos = all_pos["raw"]
+                    
                     if isinstance(all_pos, list):
                         for p in all_pos:
                             sym = str(p.get("symbol") or "").strip().upper()
                             try:
                                 amt = float(p.get("positionAmt") or 0.0)
+                                ep = float(p.get("entryPrice") or 0.0)
                             except Exception:
                                 amt = 0.0
+                                ep = 0.0
                             if not sym or abs(amt) <= 0:
                                 continue
                             # Map to our symbol format: BTCUSDT -> BTC/USDT (best-effort)
@@ -191,6 +207,7 @@ class PendingOrderWorker:
                                 hb_sym = f"{hb_sym[:-4]}/USDT"
                             side = "long" if amt > 0 else "short"
                             exch_size.setdefault(hb_sym, {"long": 0.0, "short": 0.0})[side] = abs(float(amt))
+                            exch_entry_price.setdefault(hb_sym, {"long": 0.0, "short": 0.0})[side] = abs(float(ep))
 
                 elif isinstance(client, OkxClient) and market_type == "swap":
                     resp = client.get_positions()
@@ -351,15 +368,7 @@ class PendingOrderWorker:
                             except Exception:
                                 continue
 
-                # Check for MT5 client (forex)
-                global MT5Client
-                if MT5Client is None:
-                    try:
-                        from app.services.mt5_trading import MT5Client as _MT5Client
-                        MT5Client = _MT5Client
-                    except ImportError:
-                        pass
-                if MT5Client is not None and isinstance(client, MT5Client):
+                elif MT5Client is not None and isinstance(client, MT5Client):
                     # MT5 forex positions
                     positions = client.get_positions()
                     if isinstance(positions, list):
@@ -383,6 +392,9 @@ class PendingOrderWorker:
                     logger.debug(f"position sync: skip unsupported market/client: sid={sid}, cfg={safe_cfg}, market_type={market_type}, client={type(client)}")
                     continue
 
+                # [DEBUG] Log all normalized exchange keys for inspection
+                logger.debug(f"[PositionSync] Strategy {sid} Exchange Keys: {list(exch_size.keys())}")
+
                 # 3) Apply reconciliation to local rows.
                 to_delete_ids: List[int] = []
                 to_update: List[Dict[str, Any]] = []
@@ -402,13 +414,31 @@ class PendingOrderWorker:
                     exch = exch_size.get(sym) or {}
                     exch_qty = float(exch.get(side) or 0.0)
 
+                    # Lookup entry price
+                    exch_ep_map = exch_entry_price.get(sym) or {}
+                    exch_price = float(exch_ep_map.get(side) or 0.0)
+
+                    try:
+                        local_price = float(r.get("entry_price") or 0.0)
+                    except Exception:
+                        local_price = 0.0
+                    logger.debug(f"[PositionSync] Check ID={rid} {sym} {side}: local_sz={local_size} px={local_price}, exch_sz={exch_qty} px={exch_price}")
+
                     if exch_qty <= eps:
                         # Exchange is flat -> delete local position (self-heal).
                         to_delete_ids.append(rid)
                     else:
-                        # Update local size if it diverged materially (best-effort).
-                        if local_size <= 0 or abs(exch_qty - local_size) / max(1.0, local_size) > 0.01:
-                            to_update.append({"id": rid, "size": exch_qty})
+                        # Update local size if it diverged materially (best-effort), OR if entry_price changed significantly (>0.5% diff)
+                        # or if local_price is 0 (first sync)
+                        price_diff_ratio = 0.0
+                        if local_price > 0:
+                            price_diff_ratio = abs(exch_price - local_price) / local_price
+                        else:
+                            price_diff_ratio = 1.0 if exch_price > 0 else 0.0
+
+                        if (local_size <= 0 or abs(exch_qty - local_size) / max(1.0, local_size) > 0.01) or (price_diff_ratio > 0.005):
+                            logger.info(f"[PositionSync] -> Flagged for UPDATE: {sym} (local_sz={local_size}->{exch_qty}, px={local_price}->{exch_price})")
+                            to_update.append({"id": rid, "size": exch_qty, "entry_price": exch_price})
 
                 if not to_delete_ids and not to_update:
                     continue
@@ -418,7 +448,10 @@ class PendingOrderWorker:
                     for rid in to_delete_ids:
                         cur.execute("DELETE FROM qd_strategy_positions WHERE id = %s", (int(rid),))
                     for u in to_update:
-                        cur.execute("UPDATE qd_strategy_positions SET size = %s, updated_at = NOW() WHERE id = %s", (float(u["size"]), int(u["id"])))
+                        cur.execute(
+                            "UPDATE qd_strategy_positions SET size = %s, entry_price = %s, updated_at = NOW() WHERE id = %s", 
+                            (float(u["size"]), float(u["entry_price"]), int(u["id"]))
+                        )
                     db.commit()
                     cur.close()
 
