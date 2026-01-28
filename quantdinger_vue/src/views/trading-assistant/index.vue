@@ -866,15 +866,30 @@
 
               <!-- Notification settings hint -->
               <a-alert
-                v-if="notifyChannelsUi.includes('telegram') || notifyChannelsUi.includes('email') || notifyChannelsUi.includes('discord')"
+                v-if="unconfiguredChannels.length > 0"
+                type="warning"
+                showIcon
+                style="margin-bottom: 16px">
+                <template #message>
+                  <span>
+                    {{ $t('trading-assistant.form.notificationConfigMissing', { channels: unconfiguredChannels.join(', ') }) }}
+                    <router-link to="/profile" style="margin-left: 8px">
+                      <a-icon type="setting" /> {{ $t('trading-assistant.form.goToProfile') }}
+                    </router-link>
+                  </span>
+                </template>
+              </a-alert>
+
+              <a-alert
+                v-else-if="notifyChannelsUi.length > 0 && !notifyChannelsUi.includes('browser') || (notifyChannelsUi.length > 1)"
                 type="info"
                 showIcon
                 style="margin-bottom: 16px">
                 <template #message>
                   <span>
-                    {{ $t('trading-assistant.form.notificationFromProfile') || '通知将发送到您在个人中心配置的地址' }}
+                    {{ $t('trading-assistant.form.notificationFromProfile') }}
                     <router-link to="/profile" style="margin-left: 8px">
-                      <a-icon type="setting" /> {{ $t('trading-assistant.form.goToProfile') || '前往配置' }}
+                      <a-icon type="setting" /> {{ $t('trading-assistant.form.goToProfile') }}
                     </router-link>
                   </span>
                 </template>
@@ -1413,6 +1428,30 @@ export default {
       })
 
       return { groups: groupList, ungrouped }
+    },
+    // Check if selected channels are configured in user profile
+    unconfiguredChannels () {
+      const missing = []
+      if (this.notifyChannelsUi.includes('telegram')) {
+        // Check if telegram token or chat id is missing
+        if (!this.userNotificationSettings.telegram_bot_token && !this.userNotificationSettings.telegram_chat_id) {
+          missing.push('Telegram')
+        }
+      }
+      if (this.notifyChannelsUi.includes('email')) {
+        if (!this.userNotificationSettings.email) {
+          missing.push('Email')
+        }
+      }
+      if (this.notifyChannelsUi.includes('discord')) {
+        if (!this.userNotificationSettings.discord_webhook) {
+          missing.push('Discord')
+        }
+      }
+      // Phone/SMS check if needed
+      // if (this.notifyChannelsUi.includes('phone') && !this.userNotificationSettings.phone) { ... }
+
+      return missing
     }
   },
   data () {

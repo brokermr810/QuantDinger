@@ -2642,7 +2642,12 @@ const locale = {
   'globalMarket.aboveForecast': 'Above Forecast',
   'globalMarket.belowForecast': 'Below Forecast',
   'globalMarket.upcomingEvents': 'Upcoming Events',
-  'globalMarket.releasedEvents': 'Released Data'
+  'globalMarket.releasedEvents': 'Released Data',
+
+  // Trading Assistant
+  'trading-assistant.form.notificationFromProfile': 'Notifications will be sent to the address configured in your profile.',
+  'trading-assistant.form.notificationConfigMissing': 'You have not configured parameters for selected channels ({channels}). Please go to your profile to configure them.',
+  'trading-assistant.form.goToProfile': 'Go to Profile'
 }
 
 export default {
