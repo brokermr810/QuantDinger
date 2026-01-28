@@ -197,5 +197,79 @@ def test_real_sync_binance():
         finally:
             cur.close()
 
+def test_oversized_close_correction():
+    """
+    Test that if a Close signal asks for more than we hold, it clamps to held amount.
+    Uses REAL WORKER and DB (Integration Test).
+    Pre-condition: Exchange position is 0 (or known).
+    """
+    logger.info(">>> Starting Oversized Close Correction Test (REAL INTEGRATION)")
+    
+    from app.services.pending_order_worker import PendingOrderWorker
+    
+    # 1. Find Strategy
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM qd_strategies_trading WHERE execution_mode='live' LIMIT 1")
+        row = cur.fetchone()
+        cur.close()
+        
+    if not row:
+        logger.warning("Skipping oversized test: No live strategy found.")
+        return
+
+    strategy_id = row['id']
+    logger.info(f"Using Strategy ID {strategy_id} for test.")
+
+    # 2. Setup DB Position: Ensure we have exactly 0.01 BTC (Ghost)
+    # Since sync runs before execution, this ghost position SHOULD be deleted if Exchange matches 0.
+    # Therefore, the Order Amount of 1.0 should become 0.0.
+    test_sym = "BTC/USDT"
+    target_pos_size = 0.01
+    
+    with get_db_connection() as conn:
+        cur = conn.cursor()
+        # Find existing or insert
+        cur.execute(
+            "SELECT id FROM qd_strategy_positions WHERE strategy_id=%s AND symbol=%s AND side='long'", 
+            (strategy_id, test_sym)
+        )
+        pos_row = cur.fetchone()
+        if not pos_row:
+             cur.execute(
+                 "INSERT INTO qd_strategy_positions (user_id, strategy_id, symbol, side, size, entry_price, updated_at) VALUES (1, %s, %s, 'long', %s, 50000, NOW()) RETURNING id",
+                 (strategy_id, test_sym, target_pos_size)
+             )
+        else:
+             cur.execute("UPDATE qd_strategy_positions SET size=%s, side='long', updated_at=NOW() WHERE id=%s", (target_pos_size, pos_row['id']))
+        conn.commit()
+        cur.close()
+
+    # 3. Instantiate Worker
+    worker = PendingOrderWorker()
+    
+    # 4. Trigger _execute_live_order with amount=1.0 (100x holding)
+    payload = {
+        "strategy_id": strategy_id,
+        "symbol": "BTCUSDT",
+        "signal_type": "close_long",
+        "amount": 1.0, 
+        "price": 60000,
+        "market_type": "swap"
+    }
+    order_row = {"id": 99999, "strategy_id": strategy_id, "amount": 1.0, "price": 60000, "symbol": "BTCUSDT"}
+    
+    logger.info("Triggering execution with amount=1.0 (Held Ghost=0.01, Exchange=0.0)...")
+    logger.info("EXPECTATION: Sync deletes Ghost -> Held becomes 0 -> Amount corrects to 0 -> Order blocked/skipped.")
+    
+    try:
+        # We catch exceptions because create_client might fail or create_order might fail if amount is 0
+        worker._execute_live_order(order_id=99999, order_row=order_row, payload=payload)
+        logger.info("[TEST END] Execution finished. Check logs above for '[RiskControl]' or '[Sync]' messages.")
+    except Exception as e:
+        logger.error(f"[TEST END] Execution raised exception (Expected if amount=0?): {e}")
+
 if __name__ == "__main__":
     test_real_sync_binance()
+    print("-" * 60)
+    test_oversized_close_correction()

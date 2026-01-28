@@ -130,7 +130,7 @@ class PendingOrderWorker:
         except Exception as e:
             logger.info(f"position sync skipped/failed: {e}")
 
-    def _sync_positions_best_effort(self) -> None:
+    def _sync_positions_best_effort(self, target_strategy_id: Optional[int] = None) -> None:
         """
         Best-effort reconciliation:
         - If exchange position is flat, delete local row from qd_strategy_positions.
@@ -138,14 +138,21 @@ class PendingOrderWorker:
 
         This prevents "ghost positions" when positions are closed externally on the exchange.
         """
-        # 1) Load local positions
+        # 1) Load local positions (filtered if target_strategy_id provided)
         with get_db_connection() as db:
             cur = db.cursor()
-            cur.execute("SELECT id, strategy_id, symbol, side, size, entry_price FROM qd_strategy_positions ORDER BY updated_at DESC")
+            if target_strategy_id:
+                cur.execute(
+                    "SELECT id, strategy_id, symbol, side, size, entry_price FROM qd_strategy_positions WHERE strategy_id = %s ORDER BY updated_at DESC", 
+                    (int(target_strategy_id),)
+                )
+            else:
+                cur.execute("SELECT id, strategy_id, symbol, side, size, entry_price FROM qd_strategy_positions ORDER BY updated_at DESC")
             rows = cur.fetchall() or []
             cur.close()
 
-        if not rows:
+        if not rows and not target_strategy_id:
+            # If global sync and no local positions, do nothing.
             return
 
         # Group by strategy_id for efficient exchange queries.
@@ -155,9 +162,20 @@ class PendingOrderWorker:
             if sid <= 0:
                 continue
             sid_to_rows.setdefault(sid, []).append(r)
+        
+        # If targeted sync but no local rows found, we assume user might have opened position externally 
+        # but DB is empty. However, without knowing *which* symbol to check, we can't easily auto-discover 
+        # unless we fetch ALL positions from exchange for that strategy.
+        # But `load_strategy_configs(sid)` gives us the exchange keys. 
+        # So if target_strategy_id is set but `sid_to_rows` is empty, we SHOULD explicitly add it to `sid_to_rows`
+        # so logic below enters and calls `client.get_positions()`.
+        if target_strategy_id and target_strategy_id not in sid_to_rows:
+             sid_to_rows[target_strategy_id] = []
 
         # 2) Reconcile per strategy
         for sid, plist in sid_to_rows.items():
+            if target_strategy_id and sid != target_strategy_id:
+                continue
             try:
                 sc = load_strategy_configs(int(sid))
                 if (sc.get("execution_mode") or "").strip().lower() != "live":
@@ -908,6 +926,50 @@ class PendingOrderWorker:
             leverage = 1.0
         if leverage <= 0:
             leverage = 1.0
+
+        # [FEATURE] Sync positions before execution to ensure size is checking against reality
+        # The user requested to sync before EVERY live order to prevent mismatch.
+        try:
+            logger.info(f"[Sync] Triggering pre-execution sync for strategy {strategy_id} before order {order_id}")
+            self._sync_positions_best_effort(target_strategy_id=strategy_id)
+        except Exception as e:
+            logger.warning(f"Pre-execution sync failed: {e}")
+
+        # [FEATURE] Auto-correct amount for Close/Reduce signals if we hold less than requested
+        if reduce_only:
+            try:
+                with get_db_connection() as db:
+                    cur = db.cursor()
+                    # We need to find the specific position. 
+                    # Symbol stored in DB is normalized (e.g. BTC/USDT). 
+                    # The payload 'symbol' might be 'BTCUSDT' or 'BTC/USDT'.
+                    # We try to match what stored in DB.
+                    # Best effort: try exact match, then normalized.
+                    qry_sym = str(symbol or "").strip().upper()
+                    # Mapping logic similar to _sync:
+                    if qry_sym.endswith("USDT") and "/" not in qry_sym:
+                        qry_sym = f"{qry_sym[:-4]}/USDT"
+                    
+                    cur.execute(
+                        "SELECT size FROM qd_strategy_positions WHERE strategy_id = %s AND symbol = %s AND side = %s",
+                        (strategy_id, qry_sym, pos_side)
+                    )
+                    row = cur.fetchone()
+                    cur.close()
+                    
+                    if row:
+                        held_size = float(row["size"] or 0.0)
+                        if amount > held_size:
+                            logger.warning(f"[RiskControl] Adjusting Close amount from {amount} to {held_size} (Held) for {symbol}")
+                            amount = held_size
+                    else:
+                        # No position found in DB?
+                        # If reduce_only, and no position, maybe it's 0.
+                        logger.warning(f"[RiskControl] Close signal for {symbol} but NO position found in DB. Setting amount=0.")
+                        amount = 0.0
+            except Exception as e:
+                 logger.error(f"[RiskControl] Failed to check DB position logic: {e}")
+
 
         # Collect raw exchange interactions / intermediate states for debugging & persistence.
         phases: Dict[str, Any] = {}
