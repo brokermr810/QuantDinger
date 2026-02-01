@@ -636,6 +636,7 @@ CREATE INDEX IF NOT EXISTS idx_reflection_market ON qd_reflection_records(market
 
 CREATE TABLE IF NOT EXISTS qd_analysis_memory (
     id SERIAL PRIMARY KEY,
+    user_id INT,                                -- User who created this analysis (for filtering)
     market VARCHAR(50) NOT NULL,
     symbol VARCHAR(50) NOT NULL,
     decision VARCHAR(10) NOT NULL,
@@ -662,6 +663,20 @@ CREATE TABLE IF NOT EXISTS qd_analysis_memory (
 CREATE INDEX IF NOT EXISTS idx_analysis_memory_symbol ON qd_analysis_memory(market, symbol);
 CREATE INDEX IF NOT EXISTS idx_analysis_memory_created ON qd_analysis_memory(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_analysis_memory_validated ON qd_analysis_memory(validated_at) WHERE validated_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_analysis_memory_user ON qd_analysis_memory(user_id);
+
+-- Migration: Add user_id column to existing qd_analysis_memory table
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'qd_analysis_memory' AND column_name = 'user_id'
+    ) THEN
+        ALTER TABLE qd_analysis_memory ADD COLUMN user_id INT;
+        CREATE INDEX IF NOT EXISTS idx_analysis_memory_user ON qd_analysis_memory(user_id);
+        RAISE NOTICE 'Added user_id column to qd_analysis_memory';
+    END IF;
+END $$;
 
 -- =============================================================================
 -- 20. Migration: Add token_version for single-client login

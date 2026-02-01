@@ -25,6 +25,7 @@ const locale = {
   'menu.home': 'Home',
   'menu.dashboard': 'Dashboard',
   'menu.dashboard.analysis': 'AI Analysis',
+  'menu.dashboard.aiQuant': 'AI Quant',
   'menu.dashboard.indicator': 'Indicator Analysis',
   'menu.dashboard.community': 'Indicator Market',
   'menu.dashboard.tradingAssistant': 'Trading Assistant',
@@ -877,6 +878,9 @@ const locale = {
   'dashboard.indicator.guide.section8.a6': 'A: If the chart does not display indicators, it is usually because the Python code has an error. Please check for syntax errors or array index out of bounds. It is recommended to debug the algorithm logic in a local Python environment first, then copy it in.',
   'dashboard.indicator.guide.section8.q7': 'Q: Backtest shows 0 signals?',
   'dashboard.indicator.guide.section8.a7': "A: Please check the data type of <code>df['open_long']</code>/<code>df['close_long']</code>/<code>df['open_short']</code>/<code>df['close_short']</code>. They should be boolean (True/False), not numeric. Use <code>condition.fillna(False).astype(bool)</code> to ensure correct type.",
+  'dashboard.indicator.paramsConfig.title': 'Indicator Parameters',
+  'dashboard.indicator.paramsConfig.noParams': 'No configurable parameters for this indicator',
+  'dashboard.indicator.paramsConfig.hint': 'Configure parameters and click OK to run the indicator',
   'dashboard.indicator.backtest.title': 'Indicator Backtest',
   'dashboard.indicator.backtest.config': 'Backtest Parameters',
   'dashboard.indicator.backtest.startDate': 'Start Date',
@@ -1302,6 +1306,8 @@ const locale = {
   'trading-assistant.form.qdtCostHints': 'Using strategies will consume QDT, please ensure your account has sufficient QDT balance',
   'trading-assistant.form.indicatorDescription': 'Indicator Description',
   'trading-assistant.form.noDescription': 'No description',
+  'trading-assistant.form.indicatorParams': 'Indicator Parameters',
+  'trading-assistant.form.indicatorParamsHint': 'These parameters will be passed to the indicator code. Different strategies can use different parameter values.',
   'trading-assistant.form.exchange': 'Select Exchange',
   'trading-assistant.form.apiKey': 'API Key',
   'trading-assistant.form.secretKey': 'Secret Key',
@@ -2794,7 +2800,137 @@ const locale = {
 
   // Market Overview
   'fastAnalysis.marketOverview': 'Market Overview',
-  'fastAnalysis.selectTip': 'Select a symbol from your watchlist to start AI analysis'
+  'fastAnalysis.selectTip': 'Select a symbol from your watchlist to start AI analysis',
+
+  // ==================== AI Quant ====================
+  'aiQuant.title': 'AI Quant',
+  'aiQuant.strategyList': 'Strategies',
+  'aiQuant.create': 'Create',
+  'aiQuant.edit': 'Edit',
+  'aiQuant.delete': 'Delete',
+  'aiQuant.start': 'Start',
+  'aiQuant.stop': 'Stop',
+  'aiQuant.analyze': 'Analyze Now',
+  'aiQuant.noStrategy': 'No strategies yet, click to create',
+  'aiQuant.selectStrategy': 'Select a strategy from the left',
+  'aiQuant.createFirst': 'Create Your First Strategy',
+  'aiQuant.createStrategy': 'Create Strategy',
+  'aiQuant.editStrategy': 'Edit Strategy',
+  'aiQuant.confirmDelete': 'Are you sure you want to delete this strategy?',
+  'aiQuant.latestAnalysis': 'Latest Analysis',
+  'aiQuant.analysisHistory': 'Analysis History',
+  'aiQuant.decision': 'Decision',
+  'aiQuant.confidence': 'Confidence',
+  'aiQuant.currentPrice': 'Current Price',
+  'aiQuant.entryPrice': 'Entry Price',
+  'aiQuant.stopLoss': 'Stop Loss',
+  'aiQuant.takeProfit': 'Take Profit',
+  'aiQuant.reason': 'Reason',
+  'aiQuant.analyzedAt': 'Analyzed At',
+  'aiQuant.tradeSettings': 'Trade Settings',
+  'aiQuant.minutes': 'min',
+  'aiQuant.hour': 'hour',
+  'aiQuant.hours': 'hours',
+
+  // AI Quant Stats
+  'aiQuant.stats.totalStrategies': 'Total Strategies',
+  'aiQuant.stats.runningStrategies': 'Running',
+  'aiQuant.stats.totalAnalyses': 'Analyses',
+  'aiQuant.stats.totalPnl': 'Total PnL',
+
+  // AI Quant Status
+  'aiQuant.status.running': 'Running',
+  'aiQuant.status.stopped': 'Stopped',
+  'aiQuant.status.paused': 'Paused',
+
+  // AI Quant Execution Mode
+  'aiQuant.executionMode.signal': 'Signal Only',
+  'aiQuant.executionMode.live': 'Live Trading',
+
+  // AI Quant Market Type
+  'aiQuant.marketType.spot': 'Spot',
+  'aiQuant.marketType.futures': 'Futures',
+
+  // AI Quant Fields
+  'aiQuant.field.strategyName': 'Strategy Name',
+  'aiQuant.field.market': 'Market',
+  'aiQuant.field.symbol': 'Symbol',
+  'aiQuant.field.marketType': 'Market Type',
+  'aiQuant.field.aiModel': 'AI Model',
+  'aiQuant.field.interval': 'Analysis Interval',
+  'aiQuant.field.aiPrompt': 'AI Prompt',
+  'aiQuant.field.executionMode': 'Execution Mode',
+  'aiQuant.field.positionSize': 'Position Size',
+  'aiQuant.field.stopLoss': 'Stop Loss %',
+  'aiQuant.field.takeProfit': 'Take Profit %',
+  'aiQuant.field.totalAnalyses': 'Total Analyses',
+  'aiQuant.field.totalTrades': 'Total Trades',
+  'aiQuant.field.totalPnl': 'Total PnL',
+
+  // AI Quant Placeholders
+  'aiQuant.placeholder.strategyName': 'Enter strategy name',
+  'aiQuant.placeholder.market': 'Select market',
+  'aiQuant.placeholder.symbol': 'e.g., BTC/USDT',
+  'aiQuant.placeholder.aiModel': 'Use system default',
+  'aiQuant.placeholder.aiPrompt': 'Enter your trading strategy prompt, e.g., Buy when RSI is below 30...',
+
+  // AI Quant Validation
+  'aiQuant.validation.strategyName': 'Please enter strategy name',
+  'aiQuant.validation.market': 'Please select market',
+  'aiQuant.validation.symbol': 'Please enter symbol',
+
+  // AI Quant Table Columns
+  'aiQuant.table.decision': 'Decision',
+  'aiQuant.table.confidence': 'Confidence',
+  'aiQuant.table.entryPrice': 'Entry',
+  'aiQuant.table.stopLoss': 'Stop Loss',
+  'aiQuant.table.takeProfit': 'Take Profit',
+  'aiQuant.table.time': 'Time',
+
+  // AI Quant Messages
+  'aiQuant.msg.createSuccess': 'Strategy created successfully',
+  'aiQuant.msg.updateSuccess': 'Strategy updated successfully',
+  'aiQuant.msg.deleteSuccess': 'Strategy deleted successfully',
+  'aiQuant.msg.startSuccess': 'Strategy started',
+  'aiQuant.msg.stopSuccess': 'Strategy stopped',
+  'aiQuant.msg.analyzeSuccess': 'Analysis completed',
+
+  // AI Quant New Fields
+  'aiQuant.field.initialCapital': 'Initial Capital',
+  'aiQuant.field.leverage': 'Leverage',
+  'aiQuant.field.tradeDirection': 'Trade Direction',
+  'aiQuant.field.trailingStop': 'Trailing Stop',
+  'aiQuant.field.trailingStopPct': 'Trailing Stop %',
+  'aiQuant.direction.long': 'Long Only',
+  'aiQuant.direction.short': 'Short Only',
+  'aiQuant.direction.both': 'Both',
+  'aiQuant.riskControl': 'Risk Control',
+  'aiQuant.aiSettings': 'AI Settings',
+  'aiQuant.systemDefault': 'System Default',
+  'aiQuant.placeholder.selectSymbol': 'Select from watchlist',
+  'aiQuant.hint.symbolFromWatchlist': 'Select from your watchlist, market type is auto-detected',
+  'aiQuant.hint.spotLeverageFixed': 'Spot market leverage is fixed at 1x',
+  'aiQuant.hint.stopLossEnforced': 'Enforced stop loss, AI cannot modify',
+  'aiQuant.hint.takeProfitEnforced': 'Enforced take profit, AI cannot modify',
+  'aiQuant.hint.aiPromptOnly': 'AI only determines direction based on prompt, will not modify your risk settings',
+  'aiQuant.aiLimitWarning': 'AI Permission Restricted',
+  'aiQuant.aiLimitDescription': 'AI can ONLY determine trade direction (BUY/SELL/HOLD). Leverage, position size, stop loss/take profit are fully controlled by you and CANNOT be modified by AI.',
+  'aiQuant.userStopLoss': 'Your Stop Loss',
+  'aiQuant.userTakeProfit': 'Your Take Profit',
+  'aiQuant.userLeverage': 'Your Leverage',
+  'aiQuant.validation.initialCapital': 'Please enter initial capital',
+  'aiQuant.table.currentPrice': 'Current Price',
+
+  // AI Quant Prompt Templates
+  'aiQuant.field.promptTemplate': 'Strategy Template',
+  'aiQuant.placeholder.selectTemplate': 'Select a preset template',
+  'aiQuant.template.default': '📊 Comprehensive Analysis (Recommended)',
+  'aiQuant.template.trend': '📈 Trend Following',
+  'aiQuant.template.swing': '🔄 Swing Trading',
+  'aiQuant.template.news': '📰 News Driven',
+  'aiQuant.template.custom': '✏️ Custom',
+  'aiQuant.hint.dataProvided': 'System auto-provides: real-time price, indicators (RSI/MACD/MA), recent news, macro data. AI analyzes these with your prompt to determine direction.',
+  'aiQuant.hint.liveWarning': 'Live mode will trade with REAL money! Make sure you have configured exchange API and understand the risks!'
 }
 
 export default {

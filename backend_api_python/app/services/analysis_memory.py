@@ -50,6 +50,7 @@ class AnalysisMemory:
                 cur.execute("""
                     CREATE TABLE IF NOT EXISTS qd_analysis_memory (
                         id SERIAL PRIMARY KEY,
+                        user_id INT,
                         market VARCHAR(50) NOT NULL,
                         symbol VARCHAR(50) NOT NULL,
                         decision VARCHAR(10) NOT NULL,
@@ -77,18 +78,22 @@ class AnalysisMemory:
                     
                     CREATE INDEX IF NOT EXISTS idx_analysis_memory_created 
                     ON qd_analysis_memory(created_at DESC);
+                    
+                    CREATE INDEX IF NOT EXISTS idx_analysis_memory_user
+                    ON qd_analysis_memory(user_id);
                 """)
                 db.commit()
                 cur.close()
         except Exception as e:
             logger.warning(f"Memory table creation skipped: {e}")
     
-    def store(self, analysis_result: Dict[str, Any]) -> Optional[int]:
+    def store(self, analysis_result: Dict[str, Any], user_id: int = None) -> Optional[int]:
         """
         Store an analysis result for future reference.
         
         Args:
             analysis_result: Result from FastAnalysisService.analyze()
+            user_id: User ID who created this analysis
         
         Returns:
             Memory ID or None if failed
@@ -115,12 +120,12 @@ class AnalysisMemory:
                 
                 cur.execute("""
                     INSERT INTO qd_analysis_memory (
-                        market, symbol, decision, confidence,
+                        user_id, market, symbol, decision, confidence,
                         price_at_analysis, entry_price, stop_loss, take_profit,
                         summary, reasons, risks, scores, indicators_snapshot, raw_result
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     RETURNING id
-                """, (market, symbol, decision, confidence, price, entry, stop, take, 
+                """, (user_id, market, symbol, decision, confidence, price, entry, stop, take, 
                       summary, reasons, risks, scores, indicators, raw))
                 
                 # 使用 lastrowid 属性获取 ID（execute 内部已经处理了 RETURNING）
@@ -128,7 +133,7 @@ class AnalysisMemory:
                 db.commit()
                 cur.close()
                 
-                logger.info(f"Stored analysis memory #{memory_id} for {symbol}")
+                logger.info(f"Stored analysis memory #{memory_id} for {symbol} by user {user_id}")
                 return memory_id
                 
         except Exception as e:
@@ -192,7 +197,7 @@ class AnalysisMemory:
         Get all analysis history with pagination.
         
         Args:
-            user_id: Optional user ID filter (not used currently, for future)
+            user_id: User ID filter (required to show only user's own history)
             page: Page number (1-indexed)
             page_size: Items per page
         
@@ -205,21 +210,27 @@ class AnalysisMemory:
             with get_db_connection() as db:
                 cur = db.cursor()
                 
+                # Build WHERE clause based on user_id
+                where_clause = "WHERE user_id = %s" if user_id else ""
+                params_count = (user_id,) if user_id else ()
+                
                 # Get total count
-                cur.execute("SELECT COUNT(*) as cnt FROM qd_analysis_memory")
+                cur.execute(f"SELECT COUNT(*) as cnt FROM qd_analysis_memory {where_clause}", params_count)
                 total_row = cur.fetchone()
                 total = total_row['cnt'] if total_row else 0
                 
                 # Get paginated results
-                cur.execute("""
+                params = (user_id, page_size, offset) if user_id else (page_size, offset)
+                cur.execute(f"""
                     SELECT 
                         id, market, symbol, decision, confidence, price_at_analysis,
                         summary, reasons, scores, indicators_snapshot, raw_result,
                         created_at, validated_at, was_correct, actual_return_pct
                     FROM qd_analysis_memory
+                    {where_clause}
                     ORDER BY created_at DESC
                     LIMIT %s OFFSET %s
-                """, (page_size, offset))
+                """, params)
                 
                 rows = cur.fetchall() or []
                 cur.close()
@@ -254,12 +265,13 @@ class AnalysisMemory:
             logger.error(f"Failed to get all history: {e}")
             return {"items": [], "total": 0, "page": page, "page_size": page_size}
 
-    def delete_history(self, memory_id: int) -> bool:
+    def delete_history(self, memory_id: int, user_id: int = None) -> bool:
         """
         Delete a history record by ID.
         
         Args:
             memory_id: The ID of the analysis memory to delete
+            user_id: User ID to ensure user can only delete their own records
             
         Returns:
             True if deleted successfully, False otherwise
@@ -267,7 +279,11 @@ class AnalysisMemory:
         try:
             with get_db_connection() as db:
                 cur = db.cursor()
-                cur.execute("DELETE FROM qd_analysis_memory WHERE id = %s", (memory_id,))
+                if user_id:
+                    # Only delete if it belongs to the user
+                    cur.execute("DELETE FROM qd_analysis_memory WHERE id = %s AND user_id = %s", (memory_id, user_id))
+                else:
+                    cur.execute("DELETE FROM qd_analysis_memory WHERE id = %s", (memory_id,))
                 db.commit()
                 affected = cur.rowcount
                 cur.close()

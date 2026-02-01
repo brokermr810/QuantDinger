@@ -21,6 +21,7 @@ from app.utils.logger import get_logger
 from app.utils.db import get_db_connection
 from app.data_sources import DataSourceFactory
 from app.services.kline import KlineService
+from app.services.indicator_params import IndicatorParamsParser, IndicatorCaller
 
 logger = get_logger(__name__)
 
@@ -1789,6 +1790,21 @@ class TradingExecutor:
             # Also provide a backtest-modal compatible nested config object: cfg.risk/cfg.scale/cfg.position.
             tc = dict(trading_config or {})
             cfg = self._build_cfg_from_trading_config(tc)
+            
+            # === 指标参数支持 ===
+            # 从 trading_config 获取用户设置的指标参数
+            user_indicator_params = tc.get('indicator_params', {})
+            # 解析指标代码中声明的参数
+            declared_params = IndicatorParamsParser.parse_params(indicator_code)
+            # 合并参数（用户值优先，否则使用默认值）
+            merged_params = IndicatorParamsParser.merge_params(declared_params, user_indicator_params)
+            
+            # === 指标调用器支持 ===
+            # 获取用户ID和指标ID（用于 call_indicator 权限检查）
+            user_id = tc.get('user_id', 1)
+            indicator_id = tc.get('indicator_id')
+            indicator_caller = IndicatorCaller(user_id, indicator_id)
+            
             local_vars = {
                 'df': df,
                 'open': df['open'].astype('float64'),
@@ -1802,6 +1818,8 @@ class TradingExecutor:
                 'trading_config': tc,
                 'config': tc,  # alias
                 'cfg': cfg,    # normalized nested config
+                'params': merged_params,  # 指标参数 (新增)
+                'call_indicator': indicator_caller.call_indicator,  # 调用其他指标 (新增)
                 'leverage': float(trading_config.get('leverage', 1)),
                 'initial_capital': float(trading_config.get('initial_capital', 1000)),
                 'commission': 0.001,

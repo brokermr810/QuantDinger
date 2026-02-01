@@ -385,6 +385,58 @@
         @cancel="showBacktestModal = false; backtestIndicator = null"
       />
 
+      <!-- 指标参数配置弹窗 -->
+      <a-modal
+        :visible="showParamsModal"
+        :title="$t('dashboard.indicator.paramsConfig.title')"
+        :confirmLoading="loadingParams"
+        @ok="confirmIndicatorParams"
+        @cancel="cancelIndicatorParams"
+        :width="500"
+      >
+        <div v-if="pendingIndicator" class="params-config-modal">
+          <div class="indicator-info">
+            <span class="indicator-name">{{ pendingIndicator.name }}</span>
+          </div>
+          <a-divider />
+          <div v-if="indicatorParams.length > 0" class="params-form">
+            <div v-for="param in indicatorParams" :key="param.name" class="param-item">
+              <div class="param-header">
+                <label class="param-label">{{ param.name }}</label>
+                <a-tooltip v-if="param.description" :title="param.description">
+                  <a-icon type="question-circle" style="color: #999; margin-left: 4px;" />
+                </a-tooltip>
+              </div>
+              <!-- 整数类型 -->
+              <a-input-number
+                v-if="param.type === 'int'"
+                v-model="indicatorParamValues[param.name]"
+                :precision="0"
+                style="width: 100%;"
+              />
+              <!-- 浮点数类型 -->
+              <a-input-number
+                v-else-if="param.type === 'float'"
+                v-model="indicatorParamValues[param.name]"
+                :precision="4"
+                style="width: 100%;"
+              />
+              <!-- 布尔类型 -->
+              <a-switch
+                v-else-if="param.type === 'bool'"
+                v-model="indicatorParamValues[param.name]"
+              />
+              <!-- 字符串类型 -->
+              <a-input
+                v-else
+                v-model="indicatorParamValues[param.name]"
+              />
+            </div>
+          </div>
+          <a-empty v-else :description="$t('dashboard.indicator.paramsConfig.noParams')" />
+        </div>
+      </a-modal>
+
       <!-- 回测记录抽屉 -->
       <backtest-history-drawer
         :visible="showBacktestHistoryDrawer"
@@ -684,6 +736,14 @@ export default {
     const customIndicators = ref([]) // 我创建的指标（is_buy=0）
     const purchasedIndicators = ref([]) // 我购买的指标（is_buy=1）
     const loadingIndicators = ref(false)
+
+    // 指标参数配置弹窗
+    const showParamsModal = ref(false)
+    const pendingIndicator = ref(null) // 待运行的指标
+    const pendingSource = ref('') // 待运行指标的来源 (custom/purchased)
+    const indicatorParams = ref([]) // 指标参数声明
+    const indicatorParamValues = ref({}) // 用户设置的参数值
+    const loadingParams = ref(false)
 
     // 折叠状态
     const customSectionCollapsed = ref(false) // 我创建的指标区域是否折叠
@@ -1296,9 +1356,13 @@ export default {
           return
         }
 
+        // 用户传递的参数（来自参数配置弹窗）
+        const userParams = indicator.userParams || {}
+
         // 创建一个Python指标对象
         // 保存代码到局部变量，避免闭包问题
         const savedCode = pythonCode
+        const savedUserParams = { ...userParams } // 保存用户参数
         const pythonIndicator = {
           id: indicatorId, // 格式化后的ID（如 bought-1）
           name: indicator.name,
@@ -1306,6 +1370,7 @@ export default {
           code: savedCode,
           description: indicator.description,
           parsed: parsed, // 保存解析结果
+          userParams: savedUserParams, // 保存用户参数
           // 保存原始数据库ID和用户ID，用于解密
           originalId: indicator.id, // 数据库中的真实ID
           user_id: indicator.user_id || indicator.userId, // 用户ID
@@ -1314,7 +1379,8 @@ export default {
             // 通过 KlineChart 组件的 ref 访问 executePythonStrategy 函数
             // 使用savedCode确保每个指标使用自己的代码（避免闭包问题）
             // 传递完整的indicator信息用于解密
-            return klineChart.value.executePythonStrategy(savedCode, data, params, {
+            // 将用户参数直接合并到 params 中，让指标代码可以通过 params.get('name', default) 访问
+            return klineChart.value.executePythonStrategy(savedCode, data, { ...params, ...savedUserParams }, {
               id: indicator.id, // 使用原始数据库ID
               user_id: indicator.user_id || indicator.userId,
               is_encrypted: indicator.is_encrypted || indicator.isEncrypted || 0
@@ -1322,10 +1388,10 @@ export default {
           }
         }
 
-        const indicatorParams = { ...parsed.params }
+        const indicatorParamsFromParsed = { ...parsed.params, ...userParams }
         activeIndicators.value.push({
           ...pythonIndicator,
-          params: indicatorParams
+          params: indicatorParamsFromParsed
         })
         // KlineChart 组件会通过 watch activeIndicators 自动更新图表
       } catch (error) {
@@ -1334,13 +1400,61 @@ export default {
     }
 
     // 切换指标开关
-    const toggleIndicator = (indicator, source) => {
+    const toggleIndicator = async (indicator, source) => {
       const indicatorId = `${source}-${indicator.id}`
       if (isIndicatorActive(indicatorId)) {
         removeIndicator(indicatorId)
       } else {
-        addPythonIndicator(indicator, source)
+        // 检查指标是否有参数声明
+        try {
+          loadingParams.value = true
+          const res = await proxy.$http.get('/api/indicator/getIndicatorParams', {
+            params: { indicator_id: indicator.id }
+          })
+          if (res && res.code === 1 && Array.isArray(res.data) && res.data.length > 0) {
+            // 有参数，显示配置弹窗
+            indicatorParams.value = res.data
+            indicatorParamValues.value = {}
+            res.data.forEach(p => {
+              indicatorParamValues.value[p.name] = p.default
+            })
+            pendingIndicator.value = indicator
+            pendingSource.value = source
+            showParamsModal.value = true
+          } else {
+            // 无参数，直接运行
+            addPythonIndicator(indicator, source)
+          }
+        } catch (err) {
+          console.warn('Failed to load indicator params:', err)
+          // 出错时直接运行
+          addPythonIndicator(indicator, source)
+        } finally {
+          loadingParams.value = false
+        }
       }
+    }
+
+    // 确认参数配置并运行指标
+    const confirmIndicatorParams = () => {
+      if (pendingIndicator.value) {
+        // 将参数传递给指标
+        const indicatorWithParams = {
+          ...pendingIndicator.value,
+          userParams: { ...indicatorParamValues.value }
+        }
+        addPythonIndicator(indicatorWithParams, pendingSource.value)
+      }
+      showParamsModal.value = false
+      pendingIndicator.value = null
+      pendingSource.value = ''
+    }
+
+    // 取消参数配置
+    const cancelIndicatorParams = () => {
+      showParamsModal.value = false
+      pendingIndicator.value = null
+      pendingSource.value = ''
     }
 
     // 运行指标代码（从编辑器）
@@ -1831,6 +1945,14 @@ getMarketColor,
       handlePriceChange,
       handleChartRetry,
       handleIndicatorToggle,
+      // 指标参数配置相关
+      showParamsModal,
+      pendingIndicator,
+      indicatorParams,
+      indicatorParamValues,
+      loadingParams,
+      confirmIndicatorParams,
+      cancelIndicatorParams,
       // 回测相关
       showBacktestModal,
       backtestIndicator,
@@ -3208,6 +3330,47 @@ getMarketColor,
         }
       }
     }
+  }
+}
+
+/* 指标参数配置弹窗 */
+.params-config-modal {
+  .indicator-info {
+    text-align: center;
+    margin-bottom: 8px;
+
+    .indicator-name {
+      font-size: 16px;
+      font-weight: 600;
+      color: #1f1f1f;
+    }
+  }
+
+  .params-form {
+    .param-item {
+      margin-bottom: 16px;
+
+      .param-header {
+        display: flex;
+        align-items: center;
+        margin-bottom: 6px;
+
+        .param-label {
+          font-weight: 500;
+          color: #333;
+        }
+      }
+    }
+  }
+}
+
+.theme-dark .params-config-modal {
+  .indicator-info .indicator-name {
+    color: #e0e0e0;
+  }
+
+  .params-form .param-item .param-header .param-label {
+    color: #d0d0d0;
   }
 }
 </style>

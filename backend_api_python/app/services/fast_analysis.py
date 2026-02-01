@@ -442,9 +442,17 @@ Provide your analysis now. Remember: all prices must be within 10% of ${current_
     # ==================== Main Analysis ====================
     
     def analyze(self, market: str, symbol: str, language: str = 'en-US', 
-                model: str = None, timeframe: str = "1D") -> Dict[str, Any]:
+                model: str = None, timeframe: str = "1D", user_id: int = None) -> Dict[str, Any]:
         """
         Run fast single-call analysis.
+        
+        Args:
+            market: Market type (Crypto, USStock, etc.)
+            symbol: Trading pair or stock symbol
+            language: Response language (zh-CN or en-US)
+            model: LLM model to use
+            timeframe: Analysis timeframe (1D, 4H, etc.)
+            user_id: User ID for storing analysis history
         
         Returns:
             Complete analysis result with actionable recommendations.
@@ -587,11 +595,11 @@ Provide your analysis now. Remember: all prices must be within 10% of ${current_
             })
             
             # Store in memory for future retrieval and get memory_id for feedback
-            memory_id = self._store_analysis_memory(result)
+            memory_id = self._store_analysis_memory(result, user_id=user_id)
             if memory_id:
                 result["memory_id"] = memory_id
             
-            logger.info(f"Fast analysis completed in {total_time}ms: {market}:{symbol} -> {result['decision']} (memory_id={memory_id})")
+            logger.info(f"Fast analysis completed in {total_time}ms: {market}:{symbol} -> {result['decision']} (memory_id={memory_id}, user_id={user_id})")
             
         except Exception as e:
             logger.error(f"Fast analysis failed: {e}", exc_info=True)
@@ -665,12 +673,12 @@ Provide your analysis now. Remember: all prices must be within 10% of ${current_
         
         return max(0, min(100, int(overall)))
     
-    def _store_analysis_memory(self, result: Dict) -> Optional[int]:
+    def _store_analysis_memory(self, result: Dict, user_id: int = None) -> Optional[int]:
         """Store analysis result for future learning. Returns memory_id."""
         try:
             from app.services.analysis_memory import get_analysis_memory
             memory = get_analysis_memory()
-            memory_id = memory.store(result)
+            memory_id = memory.store(result, user_id=user_id)
             return memory_id
         except Exception as e:
             logger.warning(f"Memory storage failed: {e}")

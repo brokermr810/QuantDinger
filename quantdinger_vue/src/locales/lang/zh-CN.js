@@ -27,6 +27,7 @@ const locale = {
   'menu.dashboard.indicator': '指标分析',
   'menu.dashboard.community': '指标市场',
   'menu.dashboard.analysis': 'AI 分析',
+  'menu.dashboard.aiQuant': 'AI 量化',
   'menu.dashboard.tradingAssistant': '交易助手',
   'menu.dashboard.portfolio': '资产监测',
   'menu.dashboard.globalMarket': '全球金融',
@@ -786,6 +787,9 @@ const locale = {
   'dashboard.indicator.boundary.message': '提示：指标脚本只负责“计算 + 绘图 + buy/sell 信号”；仓位、风控、加减仓、手续费/滑点属于策略执行配置。',
   'dashboard.indicator.boundary.indicatorRule': "指标脚本请只输出 buy/sell（并设定 df['buy']/df['sell']）。不要在脚本内撰写仓位管理、止盈止损、加减仓。",
   'dashboard.indicator.boundary.backtestRule': '规则：同一根K线若出现主信号（buy/sell→开/平仓/反手），本K线将跳过所有加仓与减仓。',
+  'dashboard.indicator.paramsConfig.title': '指标参数配置',
+  'dashboard.indicator.paramsConfig.noParams': '该指标没有可配置的参数',
+  'dashboard.indicator.paramsConfig.hint': '设置参数后点击确定运行指标',
   'dashboard.indicator.backtest.title': '指标回测',
   'dashboard.indicator.backtest.config': '回测参数',
   'dashboard.indicator.backtest.startDate': '开始日期',
@@ -1205,6 +1209,8 @@ const locale = {
   'trading-assistant.form.qdtCostHints': '使用策略将消耗QDT，请确保账户有足够的QDT余额',
   'trading-assistant.form.indicatorDescription': '指标描述',
   'trading-assistant.form.noDescription': '暂无描述',
+  'trading-assistant.form.indicatorParams': '指标参数',
+  'trading-assistant.form.indicatorParamsHint': '这些参数会传递给指标代码，不同策略可以使用不同的参数值',
   'trading-assistant.form.exchange': '选择交易所',
   'trading-assistant.form.apiKey': 'API Key',
   'trading-assistant.form.secretKey': 'Secret Key',
@@ -2604,7 +2610,137 @@ const locale = {
 
   // 市场概览
   'fastAnalysis.marketOverview': '市场概览',
-  'fastAnalysis.selectTip': '选择自选列表中的标的，开始 AI 智能分析'
+  'fastAnalysis.selectTip': '选择自选列表中的标的，开始 AI 智能分析',
+
+  // ==================== AI 量化 ====================
+  'aiQuant.title': 'AI 量化',
+  'aiQuant.strategyList': '策略列表',
+  'aiQuant.create': '创建',
+  'aiQuant.edit': '编辑',
+  'aiQuant.delete': '删除',
+  'aiQuant.start': '启动',
+  'aiQuant.stop': '停止',
+  'aiQuant.analyze': '立即分析',
+  'aiQuant.noStrategy': '暂无策略，点击创建开始',
+  'aiQuant.selectStrategy': '请从左侧选择一个策略',
+  'aiQuant.createFirst': '创建第一个策略',
+  'aiQuant.createStrategy': '创建策略',
+  'aiQuant.editStrategy': '编辑策略',
+  'aiQuant.confirmDelete': '确定要删除此策略吗？',
+  'aiQuant.latestAnalysis': '最新分析结果',
+  'aiQuant.analysisHistory': '分析历史',
+  'aiQuant.decision': '决策',
+  'aiQuant.confidence': '置信度',
+  'aiQuant.currentPrice': '当前价格',
+  'aiQuant.entryPrice': '建议入场',
+  'aiQuant.stopLoss': '止损价',
+  'aiQuant.takeProfit': '止盈价',
+  'aiQuant.reason': '理由',
+  'aiQuant.analyzedAt': '分析时间',
+  'aiQuant.tradeSettings': '交易设置',
+  'aiQuant.minutes': '分钟',
+  'aiQuant.hour': '小时',
+  'aiQuant.hours': '小时',
+
+  // AI量化统计
+  'aiQuant.stats.totalStrategies': '策略总数',
+  'aiQuant.stats.runningStrategies': '运行中',
+  'aiQuant.stats.totalAnalyses': '分析次数',
+  'aiQuant.stats.totalPnl': '总盈亏',
+
+  // AI量化状态
+  'aiQuant.status.running': '运行中',
+  'aiQuant.status.stopped': '已停止',
+  'aiQuant.status.paused': '已暂停',
+
+  // AI量化执行模式
+  'aiQuant.executionMode.signal': '仅信号',
+  'aiQuant.executionMode.live': '实盘交易',
+
+  // AI量化市场类型
+  'aiQuant.marketType.spot': '现货',
+  'aiQuant.marketType.futures': '合约',
+
+  // AI量化字段
+  'aiQuant.field.strategyName': '策略名称',
+  'aiQuant.field.market': '市场',
+  'aiQuant.field.symbol': '交易对',
+  'aiQuant.field.marketType': '市场类型',
+  'aiQuant.field.aiModel': 'AI 模型',
+  'aiQuant.field.interval': '分析间隔',
+  'aiQuant.field.aiPrompt': 'AI 提示词',
+  'aiQuant.field.executionMode': '执行模式',
+  'aiQuant.field.positionSize': '仓位大小',
+  'aiQuant.field.stopLoss': '止损比例',
+  'aiQuant.field.takeProfit': '止盈比例',
+  'aiQuant.field.totalAnalyses': '分析次数',
+  'aiQuant.field.totalTrades': '交易次数',
+  'aiQuant.field.totalPnl': '总盈亏',
+
+  // AI量化占位符
+  'aiQuant.placeholder.strategyName': '请输入策略名称',
+  'aiQuant.placeholder.market': '请选择市场',
+  'aiQuant.placeholder.symbol': '例如: BTC/USDT',
+  'aiQuant.placeholder.aiModel': '默认使用系统配置',
+  'aiQuant.placeholder.aiPrompt': '输入您的交易策略提示词，例如：当RSI低于30时考虑买入...',
+
+  // AI量化验证消息
+  'aiQuant.validation.strategyName': '请输入策略名称',
+  'aiQuant.validation.market': '请选择市场',
+  'aiQuant.validation.symbol': '请输入交易对',
+
+  // AI量化表格列
+  'aiQuant.table.decision': '决策',
+  'aiQuant.table.confidence': '置信度',
+  'aiQuant.table.entryPrice': '入场价',
+  'aiQuant.table.stopLoss': '止损价',
+  'aiQuant.table.takeProfit': '止盈价',
+  'aiQuant.table.time': '时间',
+
+  // AI量化消息
+  'aiQuant.msg.createSuccess': '策略创建成功',
+  'aiQuant.msg.updateSuccess': '策略更新成功',
+  'aiQuant.msg.deleteSuccess': '策略删除成功',
+  'aiQuant.msg.startSuccess': '策略已启动',
+  'aiQuant.msg.stopSuccess': '策略已停止',
+  'aiQuant.msg.analyzeSuccess': '分析完成',
+
+  // AI量化新增字段
+  'aiQuant.field.initialCapital': '投入资金',
+  'aiQuant.field.leverage': '杠杆倍数',
+  'aiQuant.field.tradeDirection': '交易方向',
+  'aiQuant.field.trailingStop': '移动止损',
+  'aiQuant.field.trailingStopPct': '移动止损比例',
+  'aiQuant.direction.long': '做多',
+  'aiQuant.direction.short': '做空',
+  'aiQuant.direction.both': '双向',
+  'aiQuant.riskControl': '风控设置',
+  'aiQuant.aiSettings': 'AI设置',
+  'aiQuant.systemDefault': '系统默认',
+  'aiQuant.placeholder.selectSymbol': '从自选列表选择交易对',
+  'aiQuant.hint.symbolFromWatchlist': '从您的自选列表中选择，系统自动识别市场类型',
+  'aiQuant.hint.spotLeverageFixed': '现货市场杠杆固定为1x',
+  'aiQuant.hint.stopLossEnforced': '强制止损，AI不可修改',
+  'aiQuant.hint.takeProfitEnforced': '强制止盈，AI不可修改',
+  'aiQuant.hint.aiPromptOnly': 'AI仅根据提示词判断方向，不会修改您设置的风控参数',
+  'aiQuant.aiLimitWarning': 'AI权限限制',
+  'aiQuant.aiLimitDescription': 'AI只能判断交易方向(买入/卖出/持有)，杠杆倍数、下单金额、止盈止损等风控参数由您完全控制，AI无法修改。',
+  'aiQuant.userStopLoss': '您的止损',
+  'aiQuant.userTakeProfit': '您的止盈',
+  'aiQuant.userLeverage': '您的杠杆',
+  'aiQuant.validation.initialCapital': '请输入投入资金',
+  'aiQuant.table.currentPrice': '当前价格',
+
+  // AI量化提示词模板
+  'aiQuant.field.promptTemplate': '策略模板',
+  'aiQuant.placeholder.selectTemplate': '选择预设策略模板',
+  'aiQuant.template.default': '📊 综合分析（推荐）',
+  'aiQuant.template.trend': '📈 趋势跟踪',
+  'aiQuant.template.swing': '🔄 波段交易',
+  'aiQuant.template.news': '📰 新闻驱动',
+  'aiQuant.template.custom': '✏️ 自定义',
+  'aiQuant.hint.dataProvided': '系统自动提供：实时价格、技术指标(RSI/MACD/均线)、最近新闻、宏观数据。AI将基于这些数据和您的提示词判断方向。',
+  'aiQuant.hint.liveWarning': '实盘模式将使用真实资金交易，请确保已配置交易所API并充分了解风险！'
 }
 
 export default {

@@ -132,13 +132,10 @@
             <span class="kpi-label">{{ $t('dashboard.runningStrategies') || '运行中策略' }}</span>
           </div>
           <div class="kpi-value">
-            <span class="amount">{{ summary.indicator_strategy_count + summary.ai_strategy_count }}</span>
+            <span class="amount">{{ summary.indicator_strategy_count }}</span>
             <span class="unit">{{ $t('dashboard.unit.strategies') }}</span>
           </div>
           <div class="kpi-sub">
-            <span class="highlight">{{ summary.ai_strategy_count }}</span>
-            <span class="label"> AI</span>
-            <span class="divider">·</span>
             <span class="highlight">{{ summary.indicator_strategy_count }}</span>
             <span class="label"> {{ $t('dashboard.label.indicator') }}</span>
           </div>
@@ -1044,14 +1041,30 @@ export default {
       if (!chartDom) return
       this.pieChart = echarts.init(chartDom)
 
+      // Use strategy_stats for pie chart data (shows all strategies, not just those with positions)
+      const stats = Array.isArray(this.summary.strategy_stats) ? this.summary.strategy_stats : []
       const raw = Array.isArray(this.summary.strategy_pnl_chart) ? this.summary.strategy_pnl_chart : []
-      const data = raw
-        .map(it => {
-          const name = (it && it.name) ? String(it.name) : '-'
-          const val = Number(it && it.value ? it.value : 0)
-          return { name, value: Math.abs(val), signedValue: val }
-        })
-        .filter(it => it.value > 0)
+
+      // Prefer strategy_stats if available, fallback to strategy_pnl_chart
+      let data = []
+      if (stats.length > 0) {
+        data = stats.map(it => {
+          const name = (it && it.strategy_name) ? String(it.strategy_name) : '-'
+          const val = Number(it && it.total_pnl ? it.total_pnl : 0)
+          const trades = Number(it && it.total_trades ? it.total_trades : 0)
+          // Use trades count as value if no PnL, so at least we show the distribution
+          const displayVal = val !== 0 ? Math.abs(val) : trades
+          return { name, value: displayVal, signedValue: val, trades }
+        }).filter(it => it.value > 0)
+      } else {
+        data = raw
+          .map(it => {
+            const name = (it && it.name) ? String(it.name) : '-'
+            const val = Number(it && it.value ? it.value : 0)
+            return { name, value: Math.abs(val), signedValue: val }
+          })
+          .filter(it => it.value > 0)
+      }
 
       const isDark = this.isDarkTheme
       const textColor = isDark ? '#9ca3af' : '#6b7280'

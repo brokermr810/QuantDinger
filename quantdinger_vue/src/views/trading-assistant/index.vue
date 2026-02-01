@@ -381,6 +381,51 @@
                   </div>
                 </a-form-item>
 
+                <!-- 指标参数配置 -->
+                <a-form-item v-if="indicatorParams.length > 0" :label="$t('trading-assistant.form.indicatorParams')">
+                  <div class="indicator-params-form">
+                    <a-row :gutter="16">
+                      <a-col v-for="param in indicatorParams" :key="param.name" :xs="24" :sm="12" :md="8">
+                        <div class="param-item">
+                          <label class="param-label">
+                            {{ param.name }}
+                            <a-tooltip v-if="param.description" :title="param.description">
+                              <a-icon type="question-circle" style="margin-left: 4px; color: #999;" />
+                            </a-tooltip>
+                          </label>
+                          <!-- 整数类型 -->
+                          <a-input-number
+                            v-if="param.type === 'int'"
+                            v-model="indicatorParamValues[param.name]"
+                            :precision="0"
+                            style="width: 100%;"
+                            size="small" />
+                          <!-- 浮点数类型 -->
+                          <a-input-number
+                            v-else-if="param.type === 'float'"
+                            v-model="indicatorParamValues[param.name]"
+                            :precision="4"
+                            style="width: 100%;"
+                            size="small" />
+                          <!-- 布尔类型 -->
+                          <a-switch
+                            v-else-if="param.type === 'bool'"
+                            v-model="indicatorParamValues[param.name]"
+                            size="small" />
+                          <!-- 字符串类型 -->
+                          <a-input
+                            v-else
+                            v-model="indicatorParamValues[param.name]"
+                            size="small" />
+                        </div>
+                      </a-col>
+                    </a-row>
+                    <div class="form-item-hint" style="margin-top: 8px;">
+                      {{ $t('trading-assistant.form.indicatorParamsHint') }}
+                    </div>
+                  </div>
+                </a-form-item>
+
                 <a-divider />
 
                 <a-form-item :label="$t('trading-assistant.form.strategyName')">
@@ -1605,6 +1650,8 @@ export default {
       loadingIndicators: false,
       availableIndicators: [],
       selectedIndicator: null,
+      indicatorParams: [], // 指标参数声明
+      indicatorParamValues: {}, // 用户设置的参数值
       cryptoSymbols: CRYPTO_SYMBOLS,
       // Watchlist symbols (same source as indicator-analysis page)
       loadingWatchlist: false,
@@ -2361,7 +2408,17 @@ export default {
           this.form.setFieldsValue({
             indicator_id: finalId
           })
-          this.handleIndicatorChange(finalId)
+          await this.handleIndicatorChange(finalId)
+
+          // 恢复已保存的指标参数值
+          const savedParams = strategy.trading_config?.indicator_params
+          if (savedParams && typeof savedParams === 'object') {
+            Object.keys(savedParams).forEach(key => {
+              if (key in this.indicatorParamValues) {
+                this.indicatorParamValues[key] = savedParams[key]
+              }
+            })
+          }
         } else {
           // 如果找不到，仍然设置值，但可能显示为ID
           this.form.setFieldsValue({
@@ -2797,9 +2854,30 @@ export default {
         this.loadingIndicators = false
       }
     },
-    handleIndicatorChange (indicatorId) {
+    async handleIndicatorChange (indicatorId) {
       const idStr = String(indicatorId)
       this.selectedIndicator = this.availableIndicators.find(ind => String(ind.id) === idStr)
+
+      // 获取指标参数声明
+      this.indicatorParams = []
+      this.indicatorParamValues = {}
+      if (indicatorId) {
+        try {
+          const res = await this.$http.get('/api/indicator/getIndicatorParams', {
+            params: { indicator_id: indicatorId }
+          })
+          // 响应拦截器已返回 response.data，所以直接访问 res.code 和 res.data
+          if (res && res.code === 1 && Array.isArray(res.data)) {
+            this.indicatorParams = res.data
+            // 初始化参数值为默认值
+            res.data.forEach(p => {
+              this.indicatorParamValues[p.name] = p.default
+            })
+          }
+        } catch (err) {
+          console.warn('Failed to load indicator params:', err)
+        }
+      }
     },
     handleMarketTypeChange (e) {
       const marketType = e.target.value
@@ -3444,7 +3522,9 @@ export default {
                 commission: values.commission || 0,
                 slippage: values.slippage || 0,
                 // AI智能决策过滤
-                enable_ai_filter: enableAiFilter
+                enable_ai_filter: enableAiFilter,
+                // 指标参数（外部传递）
+                indicator_params: this.indicatorParamValues
               }
             }
 
@@ -4988,6 +5068,25 @@ export default {
   color: var(--text-color, #666);
   font-size: 14px;
   line-height: 1.6;
+}
+
+.indicator-params-form {
+  padding: 12px;
+  background-color: var(--bg-color-secondary, #f5f7fa);
+  border-radius: 6px;
+  border: 1px dashed var(--border-color, #e0e0e0);
+}
+
+.indicator-params-form .param-item {
+  margin-bottom: 12px;
+}
+
+.indicator-params-form .param-label {
+  display: block;
+  font-size: 13px;
+  color: var(--text-color, #666);
+  margin-bottom: 4px;
+  font-weight: 500;
 }
 
 .form-item-hint {

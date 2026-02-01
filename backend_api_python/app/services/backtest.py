@@ -11,6 +11,7 @@ import numpy as np
 
 from app.data_sources import DataSourceFactory
 from app.utils.logger import get_logger
+from app.services.indicator_params import IndicatorParamsParser, IndicatorCaller
 
 logger = get_logger(__name__)
 
@@ -1113,6 +1114,21 @@ class BacktestService:
                 local_vars['initial_capital'] = backtest_params.get('initial_capital', 10000)
                 local_vars['commission'] = backtest_params.get('commission', 0.0002)
                 local_vars['trade_direction'] = backtest_params.get('trade_direction', 'both')
+            
+            # === 指标参数支持 ===
+            # 从 backtest_params 获取用户设置的指标参数
+            user_indicator_params = (backtest_params or {}).get('indicator_params', {})
+            # 解析指标代码中声明的参数
+            declared_params = IndicatorParamsParser.parse_params(code)
+            # 合并参数（用户值优先，否则使用默认值）
+            merged_params = IndicatorParamsParser.merge_params(declared_params, user_indicator_params)
+            local_vars['params'] = merged_params
+            
+            # === 指标调用器支持 ===
+            user_id = (backtest_params or {}).get('user_id', 1)
+            indicator_id = (backtest_params or {}).get('indicator_id')
+            indicator_caller = IndicatorCaller(user_id, indicator_id)
+            local_vars['call_indicator'] = indicator_caller.call_indicator
             
             # Add technical indicator functions
             local_vars.update(self._get_indicator_functions())

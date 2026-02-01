@@ -306,6 +306,48 @@ def delete_indicator():
         return jsonify({"code": 0, "msg": str(e), "data": None}), 500
 
 
+@indicator_bp.route("/getIndicatorParams", methods=["GET"])
+@login_required
+def get_indicator_params():
+    """
+    获取指标的参数声明
+    
+    用于前端在策略创建时显示可配置的参数表单。
+    
+    Query params:
+        indicator_id: 指标ID
+        
+    Returns:
+        params: [
+            {
+                "name": "ma_fast",
+                "type": "int",
+                "default": 5,
+                "description": "短期均线周期"
+            },
+            ...
+        ]
+    """
+    try:
+        from app.services.indicator_params import get_indicator_params as get_params
+        
+        indicator_id = request.args.get("indicator_id")
+        if not indicator_id:
+            return jsonify({"code": 0, "msg": "indicator_id is required", "data": None}), 400
+        
+        try:
+            indicator_id = int(indicator_id)
+        except ValueError:
+            return jsonify({"code": 0, "msg": "indicator_id must be an integer", "data": None}), 400
+        
+        params = get_params(indicator_id)
+        return jsonify({"code": 1, "msg": "success", "data": params})
+        
+    except Exception as e:
+        logger.error(f"get_indicator_params failed: {str(e)}", exc_info=True)
+        return jsonify({"code": 0, "msg": str(e), "data": None}), 500
+
+
 @indicator_bp.route("/verifyCode", methods=["POST"])
 @login_required
 def verify_code():

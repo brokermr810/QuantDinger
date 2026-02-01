@@ -49,13 +49,17 @@ def analyze():
                 'data': None
             }), 400
         
+        # Get current user's ID to associate analysis with user
+        user_id = getattr(g, 'user_id', None)
+        
         service = get_fast_analysis_service()
         result = service.analyze(
             market=market,
             symbol=symbol,
             language=language,
             model=model,
-            timeframe=timeframe
+            timeframe=timeframe,
+            user_id=user_id
         )
         
         if result.get('error'):
@@ -197,8 +201,11 @@ def get_all_history():
         page = int(request.args.get('page', 1))
         pagesize = min(int(request.args.get('pagesize', 20)), 50)
         
+        # Get current user's ID to filter history
+        user_id = getattr(g, 'user_id', None)
+        
         memory = get_analysis_memory()
-        result = memory.get_all_history(page=page, page_size=pagesize)
+        result = memory.get_all_history(user_id=user_id, page=page, page_size=pagesize)
         
         return jsonify({
             'code': 1,
@@ -229,8 +236,11 @@ def delete_history(memory_id: int):
     DELETE /api/fast-analysis/history/123
     """
     try:
+        # Get current user's ID to ensure they can only delete their own records
+        user_id = getattr(g, 'user_id', None)
+        
         memory = get_analysis_memory()
-        success = memory.delete_history(memory_id)
+        success = memory.delete_history(memory_id, user_id=user_id)
         
         if success:
             return jsonify({
@@ -241,7 +251,7 @@ def delete_history(memory_id: int):
         else:
             return jsonify({
                 'code': 0,
-                'msg': 'Record not found',
+                'msg': 'Record not found or no permission',
                 'data': None
             }), 404
         

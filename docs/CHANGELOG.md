@@ -4,6 +4,92 @@ This document records version updates, new features, bug fixes, and database mig
 
 ---
 
+## V2.1.2 (2026-02-01)
+
+### 🚀 New Features
+
+#### Indicator Parameter Support
+- **External Parameter Passing** - Indicators can now declare parameters using `# @param` syntax that can be configured per-strategy
+  - Supported types: `int`, `float`, `bool`, `str`
+  - Parameters are displayed in the strategy creation form after selecting an indicator
+  - Different strategies using the same indicator can have different parameter values
+- **Cross-Indicator Calling** - Indicators can now call other indicators using `call_indicator(id_or_name, df)` function
+  - Supports calling by indicator ID (number) or name (string)
+  - Maximum call depth of 5 to prevent circular dependencies
+  - Only allows calling own indicators or published community indicators
+
+#### Parameter Declaration Syntax
+```
+# @param <name> <type> <default> <description>
+```
+
+| Field | Description | Example |
+|-------|-------------|---------|
+| name | Parameter name (variable name) | `ma_fast` |
+| type | Data type: `int`, `float`, `bool`, `str` | `int` |
+| default | Default value | `5` |
+| description | Description (shown in UI tooltip) | `Short-term MA period` |
+
+#### Example: Dual Moving Average with Parameters
+```python
+# @param sma_short int 14 Short-term MA period
+# @param sma_long int 28 Long-term MA period
+
+# Get parameters
+sma_short_period = params.get('sma_short', 14)
+sma_long_period = params.get('sma_long', 28)
+
+my_indicator_name = "Dual MA Strategy"
+my_indicator_description = f"SMA{sma_short_period}/{sma_long_period} crossover"
+
+df = df.copy()
+sma_short = df["close"].rolling(sma_short_period).mean()
+sma_long = df["close"].rolling(sma_long_period).mean()
+
+# Golden cross / Death cross
+buy = (sma_short > sma_long) & (sma_short.shift(1) <= sma_long.shift(1))
+sell = (sma_short < sma_long) & (sma_short.shift(1) >= sma_long.shift(1))
+
+df["buy"] = buy.fillna(False).astype(bool)
+df["sell"] = sell.fillna(False).astype(bool)
+
+# Chart markers
+buy_marks = [df["low"].iloc[i] * 0.995 if df["buy"].iloc[i] else None for i in range(len(df))]
+sell_marks = [df["high"].iloc[i] * 1.005 if df["sell"].iloc[i] else None for i in range(len(df))]
+
+output = {
+    "name": my_indicator_name,
+    "plots": [
+        {"name": f"SMA{sma_short_period}", "data": sma_short.tolist(), "color": "#FF9800", "overlay": True},
+        {"name": f"SMA{sma_long_period}", "data": sma_long.tolist(), "color": "#3F51B5", "overlay": True}
+    ],
+    "signals": [
+        {"type": "buy", "text": "B", "data": buy_marks, "color": "#00E676"},
+        {"type": "sell", "text": "S", "data": sell_marks, "color": "#FF5252"}
+    ]
+}
+```
+
+#### Example: Using call_indicator()
+```python
+# Call another indicator by name or ID
+# rsi_df = call_indicator('RSI', df)           # By name
+# rsi_df = call_indicator(5, df)               # By ID
+# rsi_df = call_indicator('RSI', df, {'period': 14})  # With params
+
+# Note: The called indicator must be created first
+# and accessible (own indicator or published community indicator)
+```
+
+### 🐛 Bug Fixes
+
+#### Dashboard Fixes
+- **Fixed current positions showing records from other users** - Position synchronization now correctly associates positions with the strategy owner's user_id
+- **Fixed strategy distribution pie chart always showing "No Data"** - Chart now uses `strategy_stats` data which includes all strategies with trading activity
+- **Removed AI strategy count from running strategies card** - Dashboard now only shows indicator strategy count since AI strategies category has been removed
+
+---
+
 ## V2.1.1 (2026-01-31)
 
 ### 🚀 New Features
@@ -39,6 +125,8 @@ This document records version updates, new features, bug fixes, and database mig
 - Fixed A-share and H-share data fetching with multiple fallback sources
 - Fixed watchlist price batch fetch timeout handling
 - Fixed heatmap multi-language support for commodities and forex
+- **Fixed AI analysis history not filtered by user** - All users were seeing the same history records; now each user only sees their own analysis history
+- **Fixed "Missing Turnstile token" error when changing password** - Logged-in users no longer need Turnstile verification to request password change verification code
 
 ### 🎨 UI/UX Improvements
 - Reorganized left menu: Indicator Market moved below Indicator Analysis, Settings moved to bottom
@@ -92,9 +180,21 @@ BEGIN
     END IF;
 END $$;
 
+-- Add user_id column for user-specific history filtering
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'qd_analysis_memory' AND column_name = 'user_id'
+    ) THEN
+        ALTER TABLE qd_analysis_memory ADD COLUMN user_id INT;
+    END IF;
+END $$;
+
 CREATE INDEX IF NOT EXISTS idx_analysis_memory_symbol ON qd_analysis_memory(market, symbol);
 CREATE INDEX IF NOT EXISTS idx_analysis_memory_created ON qd_analysis_memory(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_analysis_memory_validated ON qd_analysis_memory(validated_at) WHERE validated_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_analysis_memory_user ON qd_analysis_memory(user_id);
 
 -- 2. Indicator Purchase Records
 CREATE TABLE IF NOT EXISTS qd_indicator_purchases (

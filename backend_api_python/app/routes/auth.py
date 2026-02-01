@@ -472,10 +472,25 @@ def send_verification_code():
         if not email or not email_service.is_valid_email(email):
             return jsonify({'code': 0, 'msg': 'Invalid email address', 'data': None}), 400
         
-        # Verify Turnstile
-        turnstile_ok, turnstile_msg = security.verify_turnstile(turnstile_token, ip_address)
-        if not turnstile_ok:
-            return jsonify({'code': 0, 'msg': turnstile_msg, 'data': None}), 400
+        # For change_password type with logged-in user, skip Turnstile verification
+        # because user already authenticated
+        skip_turnstile = False
+        if code_type == 'change_password':
+            # Try to get user_id from token (this route doesn't require login)
+            from app.utils.auth import verify_token
+            auth_header = request.headers.get('Authorization')
+            if auth_header:
+                parts = auth_header.split()
+                if len(parts) == 2 and parts[0].lower() == 'bearer':
+                    payload = verify_token(parts[1])
+                    if payload and payload.get('user_id'):
+                        skip_turnstile = True
+        
+        # Verify Turnstile (skip for authenticated change_password requests)
+        if not skip_turnstile:
+            turnstile_ok, turnstile_msg = security.verify_turnstile(turnstile_token, ip_address)
+            if not turnstile_ok:
+                return jsonify({'code': 0, 'msg': turnstile_msg, 'data': None}), 400
         
         # Check rate limit
         can_send, rate_msg = security.can_send_verification_code(email, ip_address)

@@ -529,10 +529,19 @@ class PendingOrderWorker:
                             (float(u["size"]), float(u["entry_price"]), int(u["id"]))
                         )
                     for ins in to_insert:
+                        # Get user_id from strategy
+                        ins_user_id = 1
+                        try:
+                            cur.execute("SELECT user_id FROM qd_strategies_trading WHERE id = %s", (int(ins["strategy_id"]),))
+                            strategy_row = cur.fetchone()
+                            if strategy_row and strategy_row.get("user_id"):
+                                ins_user_id = int(strategy_row["user_id"])
+                        except Exception:
+                            pass
                         cur.execute(
                             """INSERT INTO qd_strategy_positions (user_id, strategy_id, symbol, side, size, entry_price, updated_at)
                                VALUES (%s, %s, %s, %s, %s, %s, NOW())""",
-                            (1, int(ins["strategy_id"]), str(ins["symbol"]), str(ins["side"]), float(ins["size"]), float(ins["entry_price"]))
+                            (ins_user_id, int(ins["strategy_id"]), str(ins["symbol"]), str(ins["side"]), float(ins["size"]), float(ins["entry_price"]))
                         )
                     db.commit()
                     cur.close()
