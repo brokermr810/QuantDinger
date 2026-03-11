@@ -73,7 +73,14 @@ def create_client(exchange_config: Dict[str, Any], *, market_type: str = "swap")
         return BinanceFuturesClient(api_key=api_key, secret_key=secret_key, base_url=base_url, enable_demo_trading=is_demo)
     if exchange_id == "okx":
         base_url = _get(exchange_config, "base_url", "baseUrl") or "https://www.okx.com"
-        return OkxClient(api_key=api_key, secret_key=secret_key, passphrase=passphrase, base_url=base_url)
+        broker_code = "56fa80b0ce8cBCDE"
+        return OkxClient(
+            api_key=api_key,
+            secret_key=secret_key,
+            passphrase=passphrase,
+            base_url=base_url,
+            broker_code=broker_code
+        )
     if exchange_id == "bitget":
         base_url = _get(exchange_config, "base_url", "baseUrl") or "https://api.bitget.com"
         if mt == "spot":
@@ -198,8 +205,19 @@ def create_mt5_client(exchange_config: Dict[str, Any]):
     - mt5_password: MT5 password
     - mt5_server: Broker server name (e.g., "ICMarkets-Demo")
     - mt5_terminal_path: Optional path to terminal64.exe
+    - market_category: Must be "Forex" (validated)
+    
+    Note: MT5 is ONLY for Forex trading, not for Crypto or Stocks.
     """
     global MT5Client, MT5Config
+
+    # Validate market category - MT5 is ONLY for Forex
+    market_category = str(exchange_config.get("market_category") or "").strip()
+    if market_category and market_category != "Forex":
+        raise LiveTradingError(
+            f"MT5 can only be used for Forex trading, but market_category is '{market_category}'. "
+            f"MT5 does not support Crypto or Stock trading. Please use MT5 only with Forex market."
+        )
 
     # Lazy import to avoid ImportError if MetaTrader5 not installed
     if MT5Client is None or MT5Config is None:
@@ -213,7 +231,17 @@ def create_mt5_client(exchange_config: Dict[str, Any]):
                 "Note: This library only works on Windows."
             )
 
-    login = int(exchange_config.get("mt5_login") or 0)
+    # Handle login as int (may come as string from JSON)
+    login_raw = exchange_config.get("mt5_login") or 0
+    try:
+        login = int(login_raw) if login_raw else 0
+    except (ValueError, TypeError):
+        # Try converting string to int
+        try:
+            login = int(str(login_raw).strip())
+        except (ValueError, TypeError):
+            login = 0
+    
     password = str(exchange_config.get("mt5_password") or "").strip()
     server = str(exchange_config.get("mt5_server") or "").strip()
     terminal_path = str(exchange_config.get("mt5_terminal_path") or "").strip()

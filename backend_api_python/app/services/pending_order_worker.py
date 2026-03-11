@@ -2160,9 +2160,22 @@ class PendingOrderWorker:
             return
 
         try:
+            # Ensure client is connected before placing order
+            if not client.connected:
+                logger.warning(f"MT5 client not connected, attempting reconnect: strategy_id={strategy_id}, pending_id={order_id}")
+                if not client.connect():
+                    self._mark_failed(order_id=order_id, error="mt5_connection_failed")
+                    _console_print(f"[worker] MT5 connection failed: strategy_id={strategy_id} pending_id={order_id}")
+                    _notify_live_best_effort(status="failed", error="mt5_connection_failed")
+                    return
+            
+            # Normalize symbol before placing order (MT5 requires specific format)
+            from app.services.mt5_trading.symbols import normalize_symbol
+            normalized_symbol = normalize_symbol(symbol)
+            
             # Place market order via MT5
             result = client.place_market_order(
-                symbol=symbol,
+                symbol=normalized_symbol,
                 side=action,
                 volume=amount,
                 comment="QuantDinger",

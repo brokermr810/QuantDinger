@@ -29,6 +29,10 @@ RUN pip install --no-cache-dir --prefer-binary --timeout 120 -r requirements.txt
 # Copy application code
 COPY . .
 
+# Copy and set up entrypoint script
+COPY docker-entrypoint.sh /usr/local/bin/
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
 # Create log and data directories
 RUN mkdir -p logs data/memory
 
@@ -39,6 +43,9 @@ EXPOSE 5000
 ENV PYTHONUNBUFFERED=1
 ENV PYTHON_API_HOST=0.0.0.0
 ENV PYTHON_API_PORT=5000
+
+# Use entrypoint script to check SECRET_KEY before starting
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 # Start command
 CMD ["python", "run.py"]

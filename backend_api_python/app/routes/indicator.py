@@ -16,6 +16,7 @@ import re
 import time
 import traceback
 from typing import Any, Dict, List
+import builtins
 
 from flask import Blueprint, Response, jsonify, request, g
 import pandas as pd
@@ -25,6 +26,7 @@ from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
 from app.utils.auth import login_required
 from app.services.indicator_params import IndicatorCaller
+from app.utils.safe_exec import validate_code_safety, safe_exec_code
 import requests
 
 logger = get_logger(__name__)
@@ -385,37 +387,79 @@ def verify_code():
         # 1. Generate mock data
         df = _generate_mock_df()
         
-        # 2. Prepare execution environment
+        # 2. Prepare execution environment (sandboxed)
         exec_env = {
             'df': df.copy(),
             'pd': pd,
             'np': np,
             'output': None
         }
-        
-        # 3. Execute code
+
+        # 2.1 Create restricted __import__ that only allows safe modules
+        def safe_import(name, *args, **kwargs):
+            """Only allow importing a small set of safe modules inside indicator scripts."""
+            allowed_modules = ['numpy', 'pandas', 'math', 'json', 'datetime', 'time']
+            if name in allowed_modules or name.split('.')[0] in allowed_modules:
+                return builtins.__import__(name, *args, **kwargs)
+            raise ImportError(f"Import not allowed: {name}")
+
+        safe_builtins = {
+            k: getattr(builtins, k)
+            for k in dir(builtins)
+            if not k.startswith('_') and k not in [
+                'eval', 'exec', 'compile', 'open', 'input',
+                'help', 'exit', 'quit',
+                'copyright', 'credits', 'license'
+            ]
+        }
+        safe_builtins['__import__'] = safe_import
+
+        exec_env_sandbox = exec_env.copy()
+        exec_env_sandbox['__builtins__'] = safe_builtins
+
+        # 2.2 Pre-import commonly used modules into the sandbox
+        pre_import_code = """
+import numpy as np
+import pandas as pd
+"""
         try:
-            exec(code, exec_env)
-        except SyntaxError as e:
-            return jsonify({
-                "code": 0, 
-                "msg": f"Syntax Error at line {e.lineno}: {e.msg}", 
-                "data": {"type": "SyntaxError", "line": e.lineno, "details": str(e)}
-            })
+            exec(pre_import_code, exec_env_sandbox)
         except Exception as e:
-            # Capture traceback for better debugging
             tb = traceback.format_exc()
-            # Extract the line number from the exec() call in the traceback if possible
-            # This is tricky because the traceback includes the backend frames. 
-            # We'll just return the exception message.
             return jsonify({
-                "code": 0, 
-                "msg": f"Runtime Error: {str(e)}", 
+                "code": 0,
+                "msg": f"Runtime Error during pre-import: {str(e)}",
                 "data": {"type": type(e).__name__, "details": tb}
             })
+
+        # 3. Static safety check
+        is_safe, error_msg = validate_code_safety(code)
+        if not is_safe:
+            logger.error(f"Indicator verifyCode security check failed: {error_msg}")
+            return jsonify({
+                "code": 0,
+                "msg": f"Code contains unsafe operations: {error_msg}",
+                "data": {"type": "SecurityError", "details": error_msg}
+            })
+
+        # 4. Execute code with timeout in sandbox
+        exec_result = safe_exec_code(
+            code=code,
+            exec_globals=exec_env_sandbox,
+            exec_locals=exec_env_sandbox,
+            timeout=20  # indicator verification should be quick
+        )
+
+        if not exec_result.get('success'):
+            error_detail = exec_result.get('error') or 'Unknown error'
+            return jsonify({
+                "code": 0,
+                "msg": f"Runtime Error: {error_detail}",
+                "data": {"type": "RuntimeError", "details": error_detail}
+            })
             
-        # 4. Check output
-        output = exec_env.get('output')
+        # 5. Check output
+        output = exec_env_sandbox.get('output')
         
         if output is None:
             return jsonify({

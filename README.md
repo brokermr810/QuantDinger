@@ -73,11 +73,24 @@ cd QuantDinger
 # 2. Configure (edit admin password & AI API key)
 cp backend_api_python/env.example backend_api_python/.env
 
-# 3. Launch!
+# 3. IMPORTANT: Generate and set a secure SECRET_KEY
+# Linux/Mac:
+python3 -c "import secrets; print(secrets.token_hex(32))" | xargs -I {} sed -i 's|SECRET_KEY=.*|SECRET_KEY={}|' backend_api_python/.env
+
+# Or manually edit backend_api_python/.env and replace SECRET_KEY value
+# Windows PowerShell:
+# $key = python -c "import secrets; print(secrets.token_hex(32))"
+# (Get-Content backend_api_python\.env) -replace 'SECRET_KEY=.*', "SECRET_KEY=$key" | Set-Content backend_api_python\.env
+
+# 4. Launch!
 docker-compose up -d --build
 ```
 
-> **Windows PowerShell**: use `Copy-Item backend_api_python\env.example -Destination backend_api_python\.env`
+> **Windows PowerShell**: 
+> - Copy: `Copy-Item backend_api_python\env.example -Destination backend_api_python\.env`
+> - Generate SECRET_KEY: `python -c "import secrets; print(secrets.token_hex(32))"` then edit `.env` manually
+
+> **⚠️ Security Note**: The container will **NOT start** if `SECRET_KEY` is using the default value. This prevents insecure deployments.
 
 🎉 **Done!** Open **http://localhost:8888** | Login: `quantdinger` / `123456`
 
@@ -88,7 +101,7 @@ docker-compose up -d --build
 # Required — Change for production!
 ADMIN_USER=quantdinger
 ADMIN_PASSWORD=your_secure_password
-SECRET_KEY=your_random_secret_key
+SECRET_KEY=your_random_secret_key  # ⚠️ MUST change! Generate with: python3 -c "import secrets; print(secrets.token_hex(32))"
 
 # Optional — Enable AI features (pick one)
 OPENROUTER_API_KEY=your_key        # Recommended: 100+ models
@@ -96,6 +109,27 @@ OPENAI_API_KEY=your_key            # GPT-4o
 DEEPSEEK_API_KEY=your_key          # Cost-effective
 GOOGLE_GEMINI_API_KEY=your_key     # Gemini
 ```
+
+</details>
+
+<details>
+<summary><b>🔐 Generate SECRET_KEY (Required for Docker)</b></summary>
+
+**Before starting Docker, you MUST set a secure SECRET_KEY:**
+
+```bash
+# Option 1: Use helper script (Linux/Mac)
+./scripts/generate-secret-key.sh
+
+# Option 2: Use helper script (Windows PowerShell)
+.\scripts\generate-secret-key.ps1
+
+# Option 3: Manual generation
+python3 -c "import secrets; print(secrets.token_hex(32))"
+# Then edit backend_api_python/.env and replace SECRET_KEY value
+```
+
+**⚠️ The container will NOT start if SECRET_KEY is using the default value!**
 
 </details>
 

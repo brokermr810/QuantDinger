@@ -1,8 +1,15 @@
 # QuantDinger Docker Compose - One-Click Deployment
 # Usage:
-#   1. Copy .env.example to .env and edit your settings
-#   2. docker-compose up -d
-#   3. Open http://localhost:8888
+#   1. Copy env.example to .env and edit your settings
+#      cp backend_api_python/env.example backend_api_python/.env
+#   2. IMPORTANT: Generate and set a secure SECRET_KEY in backend_api_python/.env
+#      SECRET_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+#      Or edit backend_api_python/.env and replace SECRET_KEY value
+#   3. docker-compose up -d --build
+#   4. Open http://localhost:8888
+#
+# Note: The container will NOT start if SECRET_KEY is using the default value.
+#       This is a security measure to prevent insecure deployments.
 
 version: '3.8'
 

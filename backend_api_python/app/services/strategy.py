@@ -291,6 +291,84 @@ class StrategyService:
                 if not exchange_id:
                     return {'success': False, 'message': 'Missing exchange_id', 'data': None}
 
+                # Handle MT5 (Forex) connection test
+                if exchange_id == 'mt5':
+                    # Validate that MT5 is only used for Forex market
+                    market_category = str(resolved.get("market_category") or exchange_config.get("market_category") or "").strip()
+                    if market_category and market_category != "Forex":
+                        return {
+                            'success': False,
+                            'message': f'MT5 can only be used for Forex trading, but market_category is {market_category}. Please use MT5 only with Forex market.',
+                            'data': {'exchange': safe_cfg}
+                        }
+                    
+                    try:
+                        from app.services.live_trading.factory import create_mt5_client
+                        mt5_client = create_mt5_client(resolved)
+                        if mt5_client and mt5_client.connected:
+                            # Get account info if available
+                            account_info = None
+                            try:
+                                account_info = mt5_client.get_account_info()
+                            except Exception:
+                                pass
+                            return {
+                                'success': True,
+                                'message': 'MT5 connection successful',
+                                'data': {
+                                    'exchange': safe_cfg,
+                                    'account': account_info
+                                }
+                            }
+                        else:
+                            return {
+                                'success': False,
+                                'message': 'Failed to connect to MT5. Please check credentials and ensure terminal is running.',
+                                'data': {'exchange': safe_cfg}
+                            }
+                    except Exception as e:
+                        error_msg = str(e)
+                        return {
+                            'success': False,
+                            'message': f'MT5 connection failed: {error_msg}',
+                            'data': {'exchange': safe_cfg}
+                        }
+
+                # Handle IBKR (US Stocks) connection test
+                if exchange_id == 'ibkr':
+                    try:
+                        from app.services.live_trading.factory import create_ibkr_client
+                        ibkr_client = create_ibkr_client(resolved)
+                        # create_ibkr_client already connects, so if it returns, connection is successful
+                        if ibkr_client and ibkr_client.connected():
+                            # Get account summary if available
+                            account_summary = None
+                            try:
+                                account_summary = ibkr_client.get_account_summary()
+                            except Exception:
+                                pass
+                            return {
+                                'success': True,
+                                'message': 'IBKR connection successful',
+                                'data': {
+                                    'exchange': safe_cfg,
+                                    'account': account_summary
+                                }
+                            }
+                        else:
+                            return {
+                                'success': False,
+                                'message': 'Failed to connect to IBKR. Please check TWS/Gateway is running and credentials are correct.',
+                                'data': {'exchange': safe_cfg}
+                            }
+                    except Exception as e:
+                        error_msg = str(e)
+                        return {
+                            'success': False,
+                            'message': f'IBKR connection failed: {error_msg}',
+                            'data': {'exchange': safe_cfg}
+                        }
+
                 # IMPORTANT:
                 # Test connection should respect configured market_type (spot vs swap).
                 # Otherwise Binance will default to futures endpoints (fapi) and spot-only keys will fail with -2015.
@@ -549,6 +627,14 @@ class StrategyService:
         trading_config = payload.get('trading_config') or {}
         exchange_config = payload.get('exchange_config') or {}
 
+        # Validate MT5 can only be used for Forex trading
+        exchange_id = (exchange_config.get('exchange_id') or '').strip().lower() if isinstance(exchange_config, dict) else ''
+        if exchange_id == 'mt5' and market_category != 'Forex':
+            raise ValueError(
+                f"MT5 can only be used for Forex trading, but market_category is '{market_category}'. "
+                f"MT5 does not support Crypto or Stock trading. Please use MT5 only with Forex market."
+            )
+
         # When credential_id is present, strip raw API keys to avoid
         # storing secrets in the strategy record — they live in qd_exchange_credentials.
         if isinstance(exchange_config, dict) and exchange_config.get('credential_id'):
@@ -642,6 +728,16 @@ class StrategyService:
         base_name = (payload.get('strategy_name') or '').strip()
         if not base_name:
             raise ValueError("strategy_name is required")
+        
+        # Validate MT5 can only be used for Forex trading
+        market_category = payload.get('market_category') or 'Crypto'
+        exchange_config = payload.get('exchange_config') or {}
+        exchange_id = (exchange_config.get('exchange_id') or '').strip().lower() if isinstance(exchange_config, dict) else ''
+        if exchange_id == 'mt5' and market_category != 'Forex':
+            raise ValueError(
+                f"MT5 can only be used for Forex trading, but market_category is '{market_category}'. "
+                f"MT5 does not support Crypto or Stock trading. Please use MT5 only with Forex market."
+            )
         
         # Generate strategy group ID
         strategy_group_id = str(uuid.uuid4())[:8]

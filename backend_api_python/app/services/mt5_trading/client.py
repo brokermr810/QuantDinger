@@ -211,6 +211,23 @@ class MT5Client:
                     message=f"Symbol not found: {symbol}"
                 )
             
+            # Validate volume against symbol constraints
+            volume_float = float(volume)
+            if volume_float < symbol_info.volume_min:
+                return OrderResult(
+                    success=False,
+                    message=f"Volume {volume_float} is less than minimum {symbol_info.volume_min}"
+                )
+            if volume_float > symbol_info.volume_max:
+                return OrderResult(
+                    success=False,
+                    message=f"Volume {volume_float} exceeds maximum {symbol_info.volume_max}"
+                )
+            # Round volume to lot step
+            volume_step = symbol_info.volume_step
+            if volume_step > 0:
+                volume_float = round(volume_float / volume_step) * volume_step
+            
             if not symbol_info.visible:
                 # Enable symbol in Market Watch
                 if not mt5.symbol_select(symbol, True):
@@ -235,18 +252,28 @@ class MT5Client:
                 order_type = mt5.ORDER_TYPE_SELL
                 price = tick.bid
             
+            # Determine filling mode based on symbol properties
+            # Different brokers support different filling modes
+            filling_mode = mt5.ORDER_FILLING_IOC  # Default
+            if symbol_info.filling_mode & mt5.ORDER_FILLING_IOC:
+                filling_mode = mt5.ORDER_FILLING_IOC
+            elif symbol_info.filling_mode & mt5.ORDER_FILLING_FOK:
+                filling_mode = mt5.ORDER_FILLING_FOK
+            elif symbol_info.filling_mode & mt5.ORDER_FILLING_RETURN:
+                filling_mode = mt5.ORDER_FILLING_RETURN
+            
             # Prepare order request
             request = {
                 "action": mt5.TRADE_ACTION_DEAL,
                 "symbol": symbol,
-                "volume": float(volume),
+                "volume": volume_float,  # Use validated and rounded volume
                 "type": order_type,
                 "price": price,
                 "deviation": deviation,
                 "magic": self.config.magic_number,
                 "comment": comment,
                 "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": mt5.ORDER_FILLING_IOC,
+                "type_filling": filling_mode,
             }
             
             # Send order
@@ -419,6 +446,14 @@ class MT5Client:
             pos = position[0]
             symbol = pos.symbol
             
+            # Get symbol info for filling mode
+            symbol_info = mt5.symbol_info(symbol)
+            if symbol_info is None:
+                return OrderResult(
+                    success=False,
+                    message=f"Symbol not found: {symbol}"
+                )
+            
             # Get tick
             tick = mt5.symbol_info_tick(symbol)
             if tick is None:
@@ -437,6 +472,15 @@ class MT5Client:
             
             close_volume = volume if volume else pos.volume
             
+            # Determine filling mode based on symbol properties
+            filling_mode = mt5.ORDER_FILLING_IOC  # Default
+            if symbol_info.filling_mode & mt5.ORDER_FILLING_IOC:
+                filling_mode = mt5.ORDER_FILLING_IOC
+            elif symbol_info.filling_mode & mt5.ORDER_FILLING_FOK:
+                filling_mode = mt5.ORDER_FILLING_FOK
+            elif symbol_info.filling_mode & mt5.ORDER_FILLING_RETURN:
+                filling_mode = mt5.ORDER_FILLING_RETURN
+            
             request = {
                 "action": mt5.TRADE_ACTION_DEAL,
                 "symbol": symbol,
@@ -448,7 +492,7 @@ class MT5Client:
                 "magic": self.config.magic_number,
                 "comment": comment,
                 "type_time": mt5.ORDER_TIME_GTC,
-                "type_filling": mt5.ORDER_FILLING_IOC,
+                "type_filling": filling_mode,
             }
             
             result = mt5.order_send(request)

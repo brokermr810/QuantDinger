@@ -183,6 +183,30 @@ class LLMService:
             data["response_format"] = {"type": "json_object"}
 
         response = requests.post(url, headers=headers, json=data, timeout=timeout)
+        
+        # Handle errors with detailed messages
+        if response.status_code == 403:
+            error_msg = "OpenRouter API 403 Forbidden"
+            try:
+                error_data = response.json()
+                if "error" in error_data:
+                    error_detail = error_data["error"]
+                    if isinstance(error_detail, dict):
+                        error_msg = f"OpenRouter API 403: {error_detail.get('message', 'Forbidden')}"
+                    elif isinstance(error_detail, str):
+                        error_msg = f"OpenRouter API 403: {error_detail}"
+            except:
+                pass
+            
+            # Check if API key is configured
+            from app.config.api_keys import APIKeys
+            if not APIKeys.OPENROUTER_API_KEY:
+                error_msg += ". OPENROUTER_API_KEY 未配置，请在 backend_api_python/.env 中设置"
+            else:
+                error_msg += ". 可能的原因：1) API 密钥无效或过期 2) 账户余额不足 3) 没有权限访问该模型。请检查 https://openrouter.ai/keys"
+            
+            raise ValueError(error_msg)
+        
         response.raise_for_status()
         
         result = response.json()

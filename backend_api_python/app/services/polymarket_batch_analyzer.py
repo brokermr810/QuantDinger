@@ -139,7 +139,22 @@ class PolymarketBatchAnalyzer:
             return analyzed_markets
             
         except Exception as e:
-            logger.error(f"Batch analysis failed: {e}", exc_info=True)
+            error_msg = str(e)
+            # Provide more helpful error messages for common API errors
+            if "403" in error_msg or "Forbidden" in error_msg:
+                logger.error(
+                    f"Batch analysis failed: OpenRouter API 403 Forbidden. "
+                    f"请检查：1) OPENROUTER_API_KEY 是否正确配置 2) API 密钥是否有效 3) 账户余额是否充足。"
+                    f"错误详情: {error_msg}"
+                )
+            elif "401" in error_msg or "Unauthorized" in error_msg:
+                logger.error(
+                    f"Batch analysis failed: OpenRouter API 401 Unauthorized. "
+                    f"OPENROUTER_API_KEY 无效或已过期。请检查 backend_api_python/.env 中的配置。"
+                    f"错误详情: {error_msg}"
+                )
+            else:
+                logger.error(f"Batch analysis failed: {error_msg}", exc_info=True)
             return self._fallback_analysis(markets, max_opportunities)
     
     def _build_markets_summary(self, markets: List[Dict]) -> str:

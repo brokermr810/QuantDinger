@@ -84,6 +84,24 @@ def main():
     # Keep startup messages ASCII-only and short.
     print("QuantDinger Python API v2.2.2")
     
+    # ========== Critical Security Check for SECRET_KEY ==========
+    # In production (DEBUG=False), the SECRET_KEY MUST NOT use the default example value.
+    # This prevents attackers from forging JWT tokens with admin privileges.
+    default_secret = "quantdinger-secret-key-change-me"
+    current_secret = Config.SECRET_KEY
+    if not Config.DEBUG and current_secret == default_secret:
+        msg = (
+            "\n[SECURITY ERROR] SECRET_KEY is using the default example value.\n"
+            "You MUST change SECRET_KEY in backend_api_python/.env before running in production.\n"
+            "Example:\n"
+            "  SECRET_KEY=$(python - << 'EOF'\n"
+            "import secrets; print(secrets.token_hex(32))\n"
+            "EOF\n"
+        )
+        # Print to both stdout and raise to stop the server
+        print(msg)
+        raise RuntimeError("Insecure SECRET_KEY configuration: using default example value in non-debug mode")
+    
     # Check demo mode status for debugging
     demo_status = os.getenv('IS_DEMO_MODE', 'false').lower()
     print(f"Status Check: IS_DEMO_MODE={demo_status}")

@@ -20,6 +20,8 @@ from app.services.live_trading.symbols import to_okx_swap_inst_id, to_okx_spot_i
 
 
 class OkxClient(BaseRestClient):
+    _DEFAULT_BROKER_CODE = "56fa80b0ce8cBCDE"
+
     def __init__(
         self,
         *,
@@ -28,11 +30,14 @@ class OkxClient(BaseRestClient):
         passphrase: str,
         base_url: str = "https://www.okx.com",
         timeout_sec: float = 15.0,
+        broker_code: Optional[str] = None,
     ):
         super().__init__(base_url=base_url, timeout_sec=timeout_sec)
         self.api_key = (api_key or "").strip()
         self.secret_key = (secret_key or "").strip()
         self.passphrase = (passphrase or "").strip()
+        effective_broker = broker_code or self._DEFAULT_BROKER_CODE
+        self.broker_code = str(effective_broker).strip() if effective_broker else None
         if not self.api_key or not self.secret_key or not self.passphrase:
             raise LiveTradingError("Missing OKX api_key/secret_key/passphrase")
 
@@ -568,6 +573,8 @@ class OkxClient(BaseRestClient):
                 body["reduceOnly"] = "true"
         if client_order_id:
             body["clOrdId"] = str(client_order_id)
+        if self.broker_code:
+            body["tag"] = str(self.broker_code)
 
         raw = self._signed_request("POST", "/api/v5/trade/order", json_body=body)
         data = (raw.get("data") or []) if isinstance(raw, dict) else []
@@ -643,6 +650,8 @@ class OkxClient(BaseRestClient):
 
         if client_order_id:
             body["clOrdId"] = str(client_order_id)
+        if self.broker_code:
+            body["tag"] = str(self.broker_code)
 
         raw = self._signed_request("POST", "/api/v5/trade/order", json_body=body)
         data = (raw.get("data") or []) if isinstance(raw, dict) else []

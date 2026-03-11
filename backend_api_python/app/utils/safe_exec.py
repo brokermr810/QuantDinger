@@ -283,16 +283,13 @@ def validate_code_safety(code: str) -> Tuple[bool, Optional[str]]:
                                 if isinstance(node.args[1], ast.Constant) and node.args[1].value in dangerous_functions:
                                     return False, f"检测到通过 getattr 绕过限制: getattr({node.args[0].id}, '{node.args[1].value}')"
         
-        # 检查导入语句
+        # 检查导入语句：用户脚本中一律禁止使用 import（统一由平台注入安全依赖）
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
-                for alias in node.names:
-                    if alias.name in dangerous_modules:
-                        return False, f"检测到危险模块导入: {alias.name}"
+                return False, "不允许在脚本中使用 import 语句，请直接使用平台提供的 pd/np 等对象"
             
             if isinstance(node, ast.ImportFrom):
-                if node.module and node.module.split('.')[0] in dangerous_modules:
-                    return False, f"检测到危险模块导入: {node.module}"
+                return False, "不允许在脚本中使用 import 语句，请直接使用平台提供的 pd/np 等对象"
         
         # 检查是否有访问 __builtins__ 的尝试
         for node in ast.walk(tree):

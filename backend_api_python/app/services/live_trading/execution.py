@@ -351,9 +351,13 @@ def _place_mt5_order(
     else:
         raise LiveTradingError(f"Unsupported signal_type for MT5: {signal_type}")
 
+    # Normalize symbol before placing order (MT5 requires specific format)
+    from app.services.mt5_trading.symbols import normalize_symbol
+    normalized_symbol = normalize_symbol(symbol)
+    
     # Place market order
     result = client.place_market_order(
-        symbol=symbol,
+        symbol=normalized_symbol,
         side=action,
         volume=amount,
         comment="QuantDinger",

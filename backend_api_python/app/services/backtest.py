@@ -1223,9 +1223,29 @@ class BacktestService:
                              f"Using available end date instead. This may affect backtest results.")
             
             # Filter date range (use available data range if requested range is outside)
-            effective_start = max(start_date, data_start)
-            effective_end = min(end_date, data_end)
-            df_filtered = df[(df.index >= effective_start) & (df.index <= effective_end)].copy()
+            # If data ends before requested end_date, use the most recent data up to the requested limit
+            if data_end < end_date:
+                # Data ends before requested end date - use the most recent data
+                # Calculate how many candles we need based on requested time range
+                requested_seconds = (end_date - start_date).total_seconds()
+                requested_candles = math.ceil(requested_seconds / tf_seconds)
+                # Take the most recent N candles from available data
+                if len(df) > requested_candles:
+                    df_filtered = df.tail(requested_candles).copy()
+                    effective_start = df_filtered.index.min()
+                    effective_end = df_filtered.index.max()
+                else:
+                    # Use all available data
+                    df_filtered = df.copy()
+                    effective_start = data_start
+                    effective_end = data_end
+                    logger.warning(f"Available data ({len(df)} candles) is less than requested ({requested_candles} candles). "
+                                 f"Using all available data from {effective_start} to {effective_end}")
+            else:
+                # Normal case: filter by requested date range
+                effective_start = max(start_date, data_start)
+                effective_end = min(end_date, data_end)
+                df_filtered = df[(df.index >= effective_start) & (df.index <= effective_end)].copy()
             
             if df_filtered.empty:
                 logger.error(f"After filtering date range ({effective_start} to {effective_end}), no data remains. "
@@ -3848,7 +3868,20 @@ import pandas as pd
         
         # Calculate annualized return: simple, not compound
         # For high-return strategies, compound annualization produces unrealistic numbers
-        actual_days = (end_date - start_date).total_seconds() / 86400
+        # Use actual data time range from equity_curve instead of requested start_date/end_date
+        # This fixes the issue where data may only be available until a certain date (e.g., TSLA only to January)
+        try:
+            # Parse actual start and end times from equity_curve
+            actual_start_str = equity_curve[0]['time']
+            actual_end_str = equity_curve[-1]['time']
+            actual_start = datetime.strptime(actual_start_str, '%Y-%m-%d %H:%M')
+            actual_end = datetime.strptime(actual_end_str, '%Y-%m-%d %H:%M')
+            actual_days = (actual_end - actual_start).total_seconds() / 86400
+        except (KeyError, ValueError, IndexError) as e:
+            # Fallback to requested date range if parsing fails
+            logger.warning(f"Failed to parse actual time range from equity_curve: {e}, using requested range")
+            actual_days = (end_date - start_date).total_seconds() / 86400
+        
         years = actual_days / 365.0
         
         # Simple annualization: annualized return = total return / years
