@@ -1888,8 +1888,27 @@ class TradingExecutor:
             pre_import_code = "import numpy as np\nimport pandas as pd\n"
             exec(pre_import_code, exec_env)
             
+            # 兼容性修复：将旧版pandas的fillna(method=...)语法转换为新版语法
+            # pandas 2.0+ 移除了 fillna() 的 method 参数，需要使用 ffill() 或 bfill()
+            # 旧语法: df.fillna(method='ffill') 或 df.fillna(method="ffill")
+            # 新语法: df.ffill()
+            import re
+            compatibility_fixed_code = indicator_code
+            # 替换 fillna(method='ffill') 或 fillna(method="ffill") 为 ffill()
+            compatibility_fixed_code = re.sub(
+                r'\.fillna\(\s*method\s*=\s*["\']ffill["\']\s*\)',
+                '.ffill()',
+                compatibility_fixed_code
+            )
+            # 替换 fillna(method='bfill') 或 fillna(method="bfill") 为 bfill()
+            compatibility_fixed_code = re.sub(
+                r'\.fillna\(\s*method\s*=\s*["\']bfill["\']\s*\)',
+                '.bfill()',
+                compatibility_fixed_code
+            )
+            
             # 这里的 safe_exec_code 假设已存在
-            exec(indicator_code, exec_env)
+            exec(compatibility_fixed_code, exec_env)
             
             executed_df = exec_env.get('df', df)
 
