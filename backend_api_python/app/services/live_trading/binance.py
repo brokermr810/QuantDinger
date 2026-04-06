@@ -704,8 +704,6 @@ class BinanceFuturesClient(BaseRestClient):
             "type": "MARKET",
             "quantity": self._dec_str(q_dec, strict_precision=qty_precision),
         }
-        if reduce_only:
-            params["reduceOnly"] = "true"
         client_order_id_norm = self._format_client_order_id(client_order_id)
         if client_order_id_norm:
             params["newClientOrderId"] = client_order_id_norm
@@ -721,6 +719,10 @@ class BinanceFuturesClient(BaseRestClient):
         else:
             # Unknown mode: try without positionSide first; we may retry on -4061.
             params.pop("positionSide", None)
+
+        # reduceOnly after positionSide: in hedge mode, Binance returns -1106 if both are sent.
+        if reduce_only and not (dual_side is True and params.get("positionSide") in ("LONG", "SHORT")):
+            params["reduceOnly"] = "true"
 
         try:
             raw = self._signed_request("POST", "/fapi/v1/order", params=params)
@@ -747,6 +749,7 @@ class BinanceFuturesClient(BaseRestClient):
                 else:
                     # Likely hedge mode; retry with inferred positionSide.
                     params2["positionSide"] = (pos_norm if pos_norm in ("LONG", "SHORT") else self._infer_position_side(side=sd, reduce_only=reduce_only))
+                    params2.pop("reduceOnly", None)
                     try:
                         raw = self._signed_request("POST", "/fapi/v1/order", params=params2)
                         self._dual_side_cache = (time.time(), True)
@@ -843,8 +846,6 @@ class BinanceFuturesClient(BaseRestClient):
             "quantity": self._dec_str(q_dec, strict_precision=qty_precision),
             "price": self._dec_str(px_dec),
         }
-        if reduce_only:
-            params["reduceOnly"] = "true"
         client_order_id_norm = self._format_client_order_id(client_order_id)
         if client_order_id_norm:
             params["newClientOrderId"] = client_order_id_norm
@@ -857,6 +858,9 @@ class BinanceFuturesClient(BaseRestClient):
             params.pop("positionSide", None)
         else:
             params.pop("positionSide", None)
+
+        if reduce_only and not (dual_side is True and params.get("positionSide") in ("LONG", "SHORT")):
+            params["reduceOnly"] = "true"
         try:
             raw = self._signed_request("POST", "/fapi/v1/order", params=params)
         except LiveTradingError as e:
@@ -878,6 +882,7 @@ class BinanceFuturesClient(BaseRestClient):
                         pass
                 else:
                     params2["positionSide"] = (pos_norm if pos_norm in ("LONG", "SHORT") else self._infer_position_side(side=sd, reduce_only=reduce_only))
+                    params2.pop("reduceOnly", None)
                     try:
                         raw = self._signed_request("POST", "/fapi/v1/order", params=params2)
                         self._dual_side_cache = (time.time(), True)
