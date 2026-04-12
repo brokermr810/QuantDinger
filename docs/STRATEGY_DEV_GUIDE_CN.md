@@ -1,4 +1,4 @@
-# QuantDinger Python 策略开发指南
+# QuantDinger Python v3策略开发指南
 
 本指南对应 **当前版本** 的 QuantDinger Python 策略架构，覆盖平台已经支持的两条主要开发路径：
 

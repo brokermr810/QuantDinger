@@ -1,4 +1,4 @@
-# QuantDinger Python Strategy Development Guide
+# QuantDinger v3 Python Strategy Development Guide
 
 This guide documents the **current** Python strategy architecture in QuantDinger. It covers both development paths now supported by the product:
 
