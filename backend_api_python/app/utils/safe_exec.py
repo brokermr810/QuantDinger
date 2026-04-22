@@ -411,11 +411,12 @@ def validate_code_safety(code: str) -> Tuple[bool, Optional[str]]:
     try:
         tree = ast.parse(code)
     except SyntaxError as e:
-        return False, f"代码语法错误: {e}"
+        logger.warning(f"Code syntax validation failed: {e}")
+        return False, "代码语法错误"
     except Exception as e:
         # AST parse failure → reject (fail-closed, not fail-open)
-        logger.error(f"AST parse failed, rejecting code: {e}")
-        return False, f"代码解析失败: {e}"
+        logger.exception("AST parse failed, rejecting code")
+        return False, "代码解析失败"
 
     dangerous_modules = {
         'os', 'sys', 'subprocess', 'shutil', 'signal', 'resource',
