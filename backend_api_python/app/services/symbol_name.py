@@ -121,6 +121,31 @@ def resolve_symbol_name(market: str, symbol: str) -> Optional[str]:
             pass
         return _resolve_name_from_yfinance(s)
 
+    # MOEX (Russian equities): try MOEX ISS securities description for a name.
+    if m == 'MOEX':
+        try:
+            from app.data_sources.moex import MOEXDataSource, ISS_BASE
+            sym = MOEXDataSource._normalize_symbol(s)
+            url = f"{ISS_BASE}/securities/{sym}.json"
+            resp = requests.get(url, params={"iss.meta": "off"}, timeout=8)
+            if resp.status_code == 200:
+                payload = resp.json() or {}
+                desc = (payload.get('description') or {})
+                cols = desc.get('columns') or []
+                data = desc.get('data') or []
+                if cols and data:
+                    name_idx = cols.index('name') if 'name' in cols else None
+                    val_idx = cols.index('value') if 'value' in cols else None
+                    if name_idx is not None and val_idx is not None:
+                        for row in data:
+                            if row[name_idx] in ('SHORTNAME', 'SECNAME'):
+                                v = (row[val_idx] or '').strip()
+                                if v:
+                                    return v
+        except Exception as e:
+            logger.debug(f"MOEX name resolve failed: {symbol}: {e}")
+        return s
+
     # Crypto: at least return base ticker-like display (not a "company", but better than empty)
     if m == 'Crypto':
         if '/' in s:

@@ -21,6 +21,11 @@ _MARKET_ALIASES: Dict[str, str] = {
     "cnstock": "CNStock",
     "hkstock": "HKStock",
     "futures": "Futures",
+    "moex": "MOEX",
+    "rustock": "MOEX",
+    "rustocks": "MOEX",
+    "russianstock": "MOEX",
+    "russia": "MOEX",
 }
 
 
@@ -38,7 +43,7 @@ class DataSourceFactory:
         if not market:
             return "Crypto"
         raw = str(market).strip()
-        if raw in ("Crypto", "Forex", "Futures", "USStock", "CNStock", "HKStock"):
+        if raw in ("Crypto", "Forex", "Futures", "USStock", "CNStock", "HKStock", "MOEX"):
             return raw
         key = raw.lower().replace(" ", "").replace("-", "_")
         return _MARKET_ALIASES.get(key, raw)
@@ -98,6 +103,9 @@ class DataSourceFactory:
         elif market == 'Futures':
             from app.data_sources.futures import FuturesDataSource
             return FuturesDataSource()
+        elif market == 'MOEX':
+            from app.data_sources.moex import MOEXDataSource
+            return MOEXDataSource()
         else:
             raise ValueError(f"不支持的市场类型: {market}")
     

@@ -958,6 +958,11 @@ class StrategyService:
                 f"IBKR can only be used for US stock trading, but market_category is '{market_category}'. "
                 f"Please set market category to US Stock when using Interactive Brokers."
             )
+        if market_category == 'MOEX':
+            raise ValueError(
+                "MOEX (Moscow Exchange) is supported for analysis and backtesting only. "
+                "Live order placement on MOEX is not implemented."
+            )
 
         # When credential_id is present, strip raw API keys to avoid
         # storing secrets in the strategy record — they live in qd_exchange_credentials.
@@ -1076,7 +1081,12 @@ class StrategyService:
                 f"IBKR can only be used for US stock trading, but market_category is '{market_category}'. "
                 f"Please set market category to US Stock when using Interactive Brokers."
             )
-        
+        if market_category == 'MOEX':
+            raise ValueError(
+                "MOEX (Moscow Exchange) is supported for analysis and backtesting only. "
+                "Live order placement on MOEX is not implemented."
+            )
+
         # Generate strategy group ID
         strategy_group_id = str(uuid.uuid4())[:8]
         
@@ -1276,6 +1286,11 @@ class StrategyService:
         if ex_id == 'ibkr' and market_category != 'USStock':
             raise ValueError(
                 f"IBKR can only be used for US stock trading, but market_category is '{market_category}'."
+            )
+        if market_category == 'MOEX':
+            raise ValueError(
+                "MOEX (Moscow Exchange) is supported for analysis and backtesting only. "
+                "Live order placement on MOEX is not implemented."
             )
 
         symbol = (trading_config or {}).get('symbol')
