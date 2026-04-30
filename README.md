@@ -8,26 +8,57 @@
   <p><strong>One deployable stack for charting, AI market research, Python indicators &amp; strategies, backtests, and live execution—on your own servers and your own keys.</strong></p>
   <p><em>Self-hosted quantitative platform: from idea and AI-assisted coding to paper-style workflows and exchange-connected live trading, with optional multi-user and billing primitives for operators.</em></p>
 
-  <p style="margin-top: 1rem; margin-bottom: 0; line-height: 2;">
-    <a href="README.md"><strong>English</strong></a> &nbsp;·&nbsp;
-    <a href="docs/README_CN.md"><strong>简体中文</strong></a>
-    <span style="color: #8b949e; user-select: none;"> &nbsp;|&nbsp; </span>
-    <a href="https://ai.quantdinger.com"><strong>SaaS</strong></a><small style="color: #656d76; font-weight: normal;"> — official cloud</small>
-    &nbsp;·&nbsp;
-    <a href="https://www.youtube.com/watch?v=tNAZ9uMiUUw"><strong>Video Demo</strong></a>
-    &nbsp;·&nbsp;
-    <a href="https://www.quantdinger.com"><strong>Website</strong></a>
-    &nbsp;·&nbsp;
-    <a href="https://aws.amazon.com/marketplace/pp/prodview-naanrb7d2mbc6"><strong>AWS Marketplace</strong></a><small style="color: #656d76; font-weight: normal;"> — AMI</small>
-  </p>
-  <p style="margin-top: 1rem; margin-bottom: 0; line-height: 2;">
-    <small style="color: #656d76; text-transform: uppercase; letter-spacing: 0.12em; display: block; margin-bottom: 0.35rem;">Community</small>
-    <a href="https://t.me/quantdinger"><strong>Telegram</strong></a> &nbsp;·&nbsp;
-    <a href="https://discord.com/invite/tyx5B6TChr"><strong>Discord</strong></a> &nbsp;·&nbsp;
-    <a href="https://youtube.com/@quantdinger"><strong>YouTube</strong></a>
-  </p>
+  <table align="center" style="border: 0; margin-top: 1.15rem; margin-bottom: 0; border-collapse: collapse;">
+    <tbody>
+      <tr>
+        <td align="center" style="padding: 0 12px 10px; line-height: 1.7;">
+          <a href="README.md"><strong>English</strong></a>
+          <span style="color: #d0d7de;"> &nbsp;·&nbsp; </span>
+          <a href="docs/README_CN.md"><strong>简体中文</strong></a>
+        </td>
+      </tr>
+      <tr>
+        <td align="center" style="padding: 12px 16px 14px; border-top: 1px solid #d8dee4; line-height: 2;">
+          <a href="https://ai.quantdinger.com"><strong>SaaS</strong></a><small style="color: #656d76; font-weight: normal;"> — official cloud</small>
+          <span style="color: #d0d7de;"> &nbsp;·&nbsp; </span>
+          <a href="https://www.youtube.com/watch?v=tNAZ9uMiUUw"><strong>Video Demo</strong></a>
+          <span style="color: #d0d7de;"> &nbsp;·&nbsp; </span>
+          <a href="https://www.quantdinger.com"><strong>Website</strong></a>
+          <span style="color: #d0d7de;"> &nbsp;·&nbsp; </span>
+          <a href="https://aws.amazon.com/marketplace/pp/prodview-naanrb7d2mbc6"><strong>AWS Marketplace</strong></a><small style="color: #656d76; font-weight: normal;"> — AMI</small>
+        </td>
+      </tr>
+      <tr>
+        <td align="center" style="padding: 16px 12px 6px; border-top: 1px solid #d8dee4;">
+          <div style="color: #656d76; font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; font-weight: 600; margin-bottom: 12px;">Community</div>
+          <table align="center" role="presentation" style="border: 0; border-collapse: collapse; margin: 0 auto;">
+            <tr>
+              <td align="center" style="padding: 0 20px; vertical-align: top;">
+                <a href="https://t.me/quantdinger" title="Telegram">
+                  <img src="https://cdn.simpleicons.org/telegram/26A5E4" width="28" height="28" alt="" aria-hidden="true" /><br />
+                  <strong>Telegram</strong>
+                </a>
+              </td>
+              <td align="center" style="padding: 0 20px; vertical-align: top;">
+                <a href="https://discord.com/invite/tyx5B6TChr" title="Discord">
+                  <img src="https://cdn.simpleicons.org/discord/5865F2" width="28" height="28" alt="" aria-hidden="true" /><br />
+                  <strong>Discord</strong>
+                </a>
+              </td>
+              <td align="center" style="padding: 0 20px; vertical-align: top;">
+                <a href="https://youtube.com/@quantdinger" title="YouTube">
+                  <img src="https://cdn.simpleicons.org/youtube/FF0000" width="28" height="28" alt="" aria-hidden="true" /><br />
+                  <strong>YouTube</strong>
+                </a>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </tbody>
+  </table>
 
-  <p>
+  <p style="margin-top: 1rem;">
     <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=flat-square&logo=apache" alt="License"></a>
     <img src="https://img.shields.io/badge/Version-3.0.3-orange?style=flat-square" alt="Version">
     <img src="https://img.shields.io/badge/Python-3.10%2B%20%7C%20Docker%20image%203.12-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python">
