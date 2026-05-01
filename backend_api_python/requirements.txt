@@ -9,7 +9,7 @@ pandas>=1.5.0
 requests>=2.32.0
 certifi>=2024.2.2
 PySocks>=1.7.1
-akshare>=1.12.0
+akshare>=1.18.59
 # GHSA-752w-5fwx-jx9f (crit header); 2.12.0+
 PyJWT>=2.12.0,<3
 python-dotenv>=1.0.1
