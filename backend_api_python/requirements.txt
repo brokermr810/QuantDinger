@@ -17,7 +17,7 @@ cryptography>=43.0.0
 # HD wallet derivation (xpub -> address) for USDT payments
 bip-utils>=2.9.0
 # PostgreSQL support (multi-user mode)
-psycopg2-binary>=2.9.9
+psycopg2-binary>=2.9.12
 # Redis cache (optional but recommended for multi-worker setups)
 redis>=5.0.0
 # Production WSGI server
