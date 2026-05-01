@@ -19,7 +19,7 @@ bip-utils>=2.9.0
 # PostgreSQL support (multi-user mode)
 psycopg2-binary>=2.9.9
 # Redis cache (optional but recommended for multi-worker setups)
-redis>=5.0.0
+redis>=7.4.0
 # Production WSGI server
 gunicorn>=22.0.0
 # Password hashing
