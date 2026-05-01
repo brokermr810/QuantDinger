@@ -23,7 +23,7 @@ redis>=5.0.0
 # Production WSGI server
 gunicorn>=22.0.0
 # Password hashing
-bcrypt>=4.1.0
+bcrypt>=5.0.0
 # Interactive Brokers trading (optional, for US stock trading via TWS/IB Gateway)
 ib_insync>=0.9.86
 # MetaTrader 5 trading (optional, for forex trading via MT5 terminal, Windows only)
