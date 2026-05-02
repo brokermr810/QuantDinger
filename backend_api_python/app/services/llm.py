@@ -5,6 +5,7 @@ Kept separate from AnalysisService to avoid circular imports.
 """
 import json
 import os
+import re
 import requests
 from typing import Dict, Any, Optional, List
 from enum import Enum
@@ -60,7 +61,7 @@ PROVIDER_CONFIGS = {
         "fallback_model": "",
     },
     LLMProvider.MINIMAX: {
-        "base_url": "https://api.minimax.io/v1",
+        "base_url": "https://api.minimaxi.com/v1",
         "default_model": "MiniMax-M2.7",
         "fallback_model": "MiniMax-M2.7-highspeed",
     },
@@ -206,6 +207,8 @@ class LLMService:
         if use_json_mode:
             data["response_format"] = {"type": "json_object"}
 
+        masked_key = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else "***"
+        logger.info(f"[LLM Request] Provider: OpenAI-compatible | BaseURL: {base_url} | Model: {model} | APIKey: {masked_key}")
         response = requests.post(url, headers=headers, json=data, timeout=timeout)
         
         # Handle non-2xx with provider/model-aware details
@@ -280,6 +283,8 @@ class LLMService:
         
         headers = {"Content-Type": "application/json"}
         
+        masked_key = f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else "***"
+        logger.info(f"[LLM Request] Provider: Google-Gemini | BaseURL: {base_url} | Model: {model} | APIKey: {masked_key}")
         response = requests.post(url, headers=headers, json=data, timeout=timeout)
         response.raise_for_status()
         
@@ -578,11 +583,14 @@ class LLMService:
                     clean_text = clean_text[:-3]
             clean_text = clean_text.strip()
             
+            # Strip think tags (for reasoning models like MiniMax-M2)
+            clean_text = re.sub(r'<think>.*?</think>', '', clean_text, flags=re.DOTALL).strip()
+            
             # Parse JSON
             result = json.loads(clean_text)
             return result
         except json.JSONDecodeError:
-            logger.error(f"JSON parse failed. Raw text: {response_text[:200] if response_text else 'N/A'}")
+            # logger.error(f"JSON parse failed after stripping think tags. Clean text: {clean_text[:300] if clean_text else 'N/A'}")
             
             # Try extracting JSON substring
             try:
