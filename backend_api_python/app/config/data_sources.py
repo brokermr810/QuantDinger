@@ -83,6 +83,7 @@ class MetaYFinanceConfig(type):
     def INTERVAL_MAP(cls):
         return {
             '1m': '1m',
+            '3m': '3m',
             '5m': '5m',
             '15m': '15m',
             '30m': '30m',
@@ -119,6 +120,7 @@ class MetaCCXTConfig(type):
     def TIMEFRAME_MAP(cls):
         return {
             '1m': '1m',
+            '3m': '3m',
             '5m': '5m',
             '15m': '15m',
             '30m': '30m',

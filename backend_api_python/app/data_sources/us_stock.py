@@ -22,6 +22,7 @@ class USStockDataSource(BaseDataSource):
     # yfinance 时间周期映射
     INTERVAL_MAP = {
         '1m': '1m',
+        '3m': '1m',
         '5m': '5m',
         '15m': '15m',
         '30m': '30m',
@@ -35,6 +36,7 @@ class USStockDataSource(BaseDataSource):
     # 美股每日约6.5交易小时，交易日/日历日 ≈ 5/7；乘1.5留余量
     DAYS_MAP = {
         '1m': lambda limit: min(7, max(1, (limit // 390) + 2)),
+        '3m': lambda limit: min(7, max(1, (limit // 130) + 2)),
         '5m': lambda limit: min(60, max(1, (limit // 78) + 2)),
         '15m': lambda limit: min(60, max(2, (limit // 26) + 3)),
         '30m': lambda limit: min(60, max(2, (limit // 13) + 3)),
@@ -42,6 +44,10 @@ class USStockDataSource(BaseDataSource):
         '4H': lambda limit: min(730, max(10, int(limit / 1.625 * 7 / 5 * 1.5) + 5)),
         '1D': lambda limit: min(3650, limit + 1),
         '1W': lambda limit: min(3650, (limit * 7) + 7)
+    }
+
+    MERGE_FACTOR_MAP = {
+        '3m': 3,
     }
     
     def __init__(self):
@@ -181,7 +187,9 @@ class USStockDataSource(BaseDataSource):
         try:
             interval = self.INTERVAL_MAP.get(timeframe, '1d')
             days_func = self.DAYS_MAP.get(timeframe, lambda x: x + 1)
-            days = days_func(limit)
+            merge_factor = self.MERGE_FACTOR_MAP.get(timeframe, 1)
+            effective_limit = limit * merge_factor
+            days = days_func(effective_limit)
             
             # 计算日期范围
             if before_time:
@@ -212,7 +220,9 @@ class USStockDataSource(BaseDataSource):
                             truncate=(after_time is None),
                         )
             else:
-                klines = self._convert_dataframe(df, limit)
+                klines = self._convert_dataframe(df, effective_limit)
+                if merge_factor > 1:
+                    klines = self._merge_every_n_sorted_bars(klines, merge_factor)
             
             # 过滤和限制
             klines = self.filter_and_limit(
@@ -252,7 +262,24 @@ class USStockDataSource(BaseDataSource):
         except Exception as e:
             logger.warning(f"yfinance fetch failed: {e}")
             return None
-    
+
+    def _merge_every_n_sorted_bars(self, bars: List[Dict[str, Any]], n: int) -> List[Dict[str, Any]]:
+        if n <= 1 or len(bars) < n:
+            return bars
+        bars = sorted(bars, key=lambda x: x['time'])
+        out = []
+        for i in range(0, len(bars) - len(bars) % n, n):
+            chunk = bars[i:i + n]
+            out.append({
+                'time': chunk[0]['time'],
+                'open': chunk[0]['open'],
+                'high': max(b['high'] for b in chunk),
+                'low': min(b['low'] for b in chunk),
+                'close': chunk[-1]['close'],
+                'volume': round(sum(b['volume'] for b in chunk), 2),
+            })
+        return out
+
     def _fetch_finnhub(
         self,
         symbol: str,

@@ -138,6 +138,7 @@ def _get_twelve_data_api_key() -> str:
 
 _TD_INTERVAL_MAP = {
     "1m": "1min",
+    "3m": "1min",
     "5m": "5min",
     "15m": "15min",
     "30m": "30min",
@@ -184,11 +185,12 @@ def fetch_twelvedata_klines(
         return []
 
     symbol, exchange = _td_symbol_and_exchange(tencent_code, is_hk)
+    merge_factor = _MERGE_FACTOR_MAP.get(timeframe, 1)
     params: Dict[str, Any] = {
         "symbol": symbol,
         "exchange": exchange,
         "interval": interval,
-        "outputsize": min(int(limit), 5000),
+        "outputsize": min(int(limit) * merge_factor, 5000),
         "apikey": api_key,
         "format": "JSON",
         "dp": "4",
@@ -260,6 +262,8 @@ def fetch_twelvedata_klines(
             continue
 
     out.sort(key=lambda x: x["time"])
+    if merge_factor > 1 and out:
+        out = _merge_every_n_sorted_bars(out, merge_factor)
     logger.debug("TwelveData returned %d bars for %s/%s tf=%s", len(out), symbol, exchange, timeframe)
     return out
 
@@ -288,6 +292,7 @@ def yf_symbol_from_tencent(tencent_code: str, is_hk: bool) -> str:
 
 _YF_INTERVAL_MAP = {
     "1m": "1m",
+    "3m": "1m",
     "5m": "5m",
     "15m": "15m",
     "30m": "30m",
@@ -295,6 +300,11 @@ _YF_INTERVAL_MAP = {
     "4H": "1h",
     "1D": "1d",
     "1W": "1wk",
+}
+
+_MERGE_FACTOR_MAP = {
+    "3m": 3,
+    "4H": 4,
 }
 
 _YF_DAYS_MAP = {
@@ -372,7 +382,8 @@ def fetch_yfinance_klines(
         return []
 
     yf_sym = yf_symbol_from_tencent(tencent_code, is_hk)
-    effective_limit = limit * 4 if timeframe == "4H" else limit
+    merge_factor = _MERGE_FACTOR_MAP.get(timeframe, 1)
+    effective_limit = limit * merge_factor
     days_func = _YF_DAYS_MAP.get(timeframe, lambda x: x + 10)
     days = days_func(effective_limit)
 
@@ -402,8 +413,8 @@ def fetch_yfinance_klines(
             return []
 
     bars = _bars_from_yfinance_df(df)
-    if timeframe == "4H" and bars:
-        bars = _merge_every_n_sorted_bars(bars, 4)
+    if merge_factor > 1 and bars:
+        bars = _merge_every_n_sorted_bars(bars, merge_factor)
     logger.debug("yfinance returned %d bars for %s tf=%s", len(bars), yf_sym, timeframe)
     return bars
 
@@ -413,7 +424,7 @@ def fetch_yfinance_klines(
 # ---------------------------------------------------------------------------
 
 def _minute_period_str(timeframe: str) -> Optional[str]:
-    return {"1m": "1", "5m": "5", "15m": "15", "30m": "30", "1H": "60", "4H": "60"}.get(timeframe)
+    return {"1m": "1", "3m": "1", "5m": "5", "15m": "15", "30m": "30", "1H": "60", "4H": "60"}.get(timeframe)
 
 
 def _min_bar_window(timeframe: str, limit: int, before_time: Optional[int]) -> tuple[str, str]:
@@ -525,8 +536,9 @@ def fetch_akshare_minute_klines(
             return []
 
     bars = _bars_from_ak_min_df(df)
-    if timeframe == "4H" and bars:
-        bars = _merge_every_n_sorted_bars(bars, 4)
+    merge_factor = _MERGE_FACTOR_MAP.get(timeframe, 1)
+    if merge_factor > 1 and bars:
+        bars = _merge_every_n_sorted_bars(bars, merge_factor)
     return bars
 
 

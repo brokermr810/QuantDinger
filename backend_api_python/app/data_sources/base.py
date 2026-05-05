@@ -14,6 +14,7 @@ logger = get_logger(__name__)
 # K线周期映射（秒数）
 TIMEFRAME_SECONDS = {
     '1m': 60,
+    '3m': 180,
     '5m': 300,
     '15m': 900,
     '30m': 1800,
