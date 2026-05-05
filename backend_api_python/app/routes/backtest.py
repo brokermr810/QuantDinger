@@ -235,17 +235,28 @@ def run_backtest():
         start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
         # 结束日期：当天的 23:59:59，确保包含整天的数据
         end_date = datetime.strptime(end_date_str, '%Y-%m-%d').replace(hour=23, minute=59, second=59)
-        
+
         # 验证时间范围限制
         days_diff = (end_date - start_date).days
         max_end_date, max_range_text = _backtest_range_limit(timeframe, start_date)
         max_end_date = max_end_date.replace(hour=23, minute=59, second=59)
-        
+
         if end_date > max_end_date:
             max_days = (max_end_date - start_date).days
+            # 生成友好的错误提示
+            suggestion = ""
+            if timeframe == '1m':
+                suggestion = "建议：切换到更长周期（如 5m、15m、1h）或缩短回测时间范围"
+            elif timeframe == '5m':
+                suggestion = "建议：切换到更长周期（如 15m、30m、1h）或缩短回测时间范围"
+            elif timeframe in ['15m', '30m']:
+                suggestion = "建议：切换到更长周期（如 1h、4h、1d）以获得更长回测范围"
+            else:
+                suggestion = "建议：切换到更长周期（如 4h、1d）以获得更长回测范围"
+
             return jsonify({
                 'code': 0,
-                'msg': f'Backtest range exceeds limit: timeframe {timeframe} supports up to {max_range_text} ({max_days} days), but you selected {days_diff} days',
+                'msg': f'回测时间范围超出限制\n\n当前周期：{timeframe}\n支持最大范围：{max_range_text}（{max_days}天）\n您选择的天数：{days_diff}天\n\n{suggestion}\n\n各周期支持的最大回测范围：\n• 1m → 1个月\n• 5m → 6个月\n• 15m/30m → 1年\n• 1h/4h/1d → 3年',
                 'data': None
             }), 400
 

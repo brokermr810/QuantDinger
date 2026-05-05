@@ -961,6 +961,9 @@ Return **only** valid Python source: **no** markdown fences, **no** ` ``` `, **n
         if content.endswith("```"):
             content = content[:-3]
         
+        # Remove think tags (similar to llm.py processing)
+        content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+        
         return content.strip() or _template_code()
 
     AUTO_FIX_HINT_CODES = {
@@ -1042,6 +1045,10 @@ Return **only** valid Python source: **no** markdown fences, **no** ` ``` `, **n
             content = content[3:]
         if content.endswith("```"):
             content = content[:-3]
+        
+        # Remove think tags (similar to llm.py processing)
+        content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL).strip()
+        
         return content.strip() or bad_code
 
     def _generate_final_code() -> tuple[str, Dict[str, Any]]:
