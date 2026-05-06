@@ -1,0 +1,92 @@
+services:
+
+  # ─────────────────────────────────────────────
+  # PostgreSQL
+  # ─────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: quantdinger-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-quantdinger}
+      POSTGRES_USER: ${POSTGRES_USER:-quantdinger}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      TZ: Asia/Hong_Kong
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend_api_python/migrations/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./backend_api_python/migrations:/migrations
+    networks:
+      - dokploy-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-quantdinger} -d ${POSTGRES_DB:-quantdinger}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────────
+  # Backend (Flask API)
+  # 所有 env 從 Dokploy Environment Variables 自動注入
+  # ─────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend_api_python
+      dockerfile: Dockerfile
+    container_name: quantdinger-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - backend_logs:/app/logs
+      - backend_data:/app/data
+    environment:
+      - PYTHON_API_HOST=0.0.0.0
+      - PYTHON_API_PORT=5000
+      - TZ=Asia/Hong_Kong
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-quantdinger}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-quantdinger}
+      - DB_TYPE=postgresql
+    networks:
+      - dokploy-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ─────────────────────────────────────────────
+  # Frontend (Nginx，port 80)
+  # ─────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: quantdinger-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    networks:
+      - dokploy-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.quantdinger.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.quantdinger.entrypoints=websecure"
+      - "traefik.http.routers.quantdinger.tls.certResolver=letsencrypt"
+      - "traefik.http.services.quantdinger.loadbalancer.server.port=80"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  postgres_data:
+    driver: local
+  backend_logs:
+    driver: local
+  backend_data:
+    driver: local
+
+networks:
+  dokploy-network:
+    external: true
