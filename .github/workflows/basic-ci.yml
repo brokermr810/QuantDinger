@@ -99,10 +99,10 @@ jobs:
       - name: Verify Nginx config
         run: |
           echo "Checking Nginx configuration..."
-          if [ -f "frontend/nginx.conf" ]; then
-            echo "✓ frontend/nginx.conf exists"
+          if [ -f "frontend/nginx.conf.template" ]; then
+            echo "✓ frontend/nginx.conf.template exists"
           else
-            echo "✗ frontend/nginx.conf is missing!"
+            echo "✗ frontend/nginx.conf.template is missing!"
             exit 1
           fi
 
