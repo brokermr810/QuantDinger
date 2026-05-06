@@ -1,0 +1,107 @@
+services:
+
+  # ─────────────────────────────────────────────
+  # PostgreSQL
+  # ─────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: quantdinger-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-quantdinger}
+      POSTGRES_USER: ${POSTGRES_USER:-quantdinger}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}        # 必填，唔能留空
+      TZ: Asia/Hong_Kong
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend_api_python/migrations/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./backend_api_python/migrations:/migrations
+    # ⚠️ 原版有 ports: 127.0.0.1:5432:5432
+    # Dokploy 上唔需要 expose 到 host，內部 network 夠用，已移除
+    networks:
+      - dokploy-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-quantdinger} -d ${POSTGRES_DB:-quantdinger}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────────
+  # Backend (Flask API)
+  # ─────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend_api_python
+      dockerfile: Dockerfile
+    container_name: quantdinger-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      # ⚠️ 重要：Dokploy auto deploy 每次 git clone 會清目錄
+      # logs/data 用 named volume，唔好用 bind mount ./backend_api_python/logs
+      - backend_logs:/app/logs
+      - backend_data:/app/data
+      # .env 透過 Dokploy File Mounts 掛入，見下方說明
+      # 唔好在呢度 mount ./backend_api_python/.env（會被 git clone 清走）
+    environment:
+      - PYTHON_API_HOST=0.0.0.0
+      - PYTHON_API_PORT=5000
+      - TZ=Asia/Hong_Kong
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-quantdinger}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-quantdinger}
+      - DB_TYPE=postgresql
+    # ⚠️ 原版有 ports: 127.0.0.1:5000:5000
+    # Dokploy 上唔需要，只係 frontend/nginx 內部訪問
+    networks:
+      - dokploy-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ─────────────────────────────────────────────
+  # Frontend (Nginx，監聽 port 80)
+  # ─────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend          # 原版係 ./quantdinger_vue，你的 fork 確認係 ./frontend
+      dockerfile: Dockerfile
+    container_name: quantdinger-frontend
+    restart: unless-stopped
+    depends_on:
+      - backend
+    # ⚠️ 唔用 ports: 8888:80，改用 Traefik label 路由
+    networks:
+      - dokploy-network
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.quantdinger.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.quantdinger.entrypoints=websecure"
+      - "traefik.http.routers.quantdinger.tls.certResolver=letsencrypt"
+      # nginx 監聽 80（原版 8888:80 即 container 內係 80）
+      - "traefik.http.services.quantdinger.loadbalancer.server.port=80"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+# ─────────────────────────────────────────────
+# Named Volumes
+# ─────────────────────────────────────────────
+volumes:
+  postgres_data:
+    driver: local
+  backend_logs:
+    driver: local
+  backend_data:
+    driver: local
+
+# ─────────────────────────────────────────────
+# Network：必須係 dokploy-network（external）
+# ─────────────────────────────────────────────
+networks:
+  dokploy-network:
+    external: true
