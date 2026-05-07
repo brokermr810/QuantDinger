@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/brokermr810-quantdinger-badge.png)](https://mseep.ai/app/brokermr810-quantdinger)
+
 <div align="center">
   <a href="https://github.com/brokermr810/QuantDinger">
     <img src="docs/screenshots/logo.jpg" alt="QuantDinger Logo" width="220" height="220">
