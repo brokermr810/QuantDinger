@@ -228,6 +228,16 @@ def create_app(config_name='default'):
     CORS(app)
     
     setup_logger()
+
+    # ib_insync uses asyncio across Flask + worker threads; without this, IBKR
+    # sockets often drop within seconds (nested loop / thread handoff issues).
+    try:
+        from ib_insync import util as _ib_util
+
+        _ib_util.patchAsyncio()
+        logger.info("ib_insync: patchAsyncio enabled for stable IBKR connections")
+    except Exception as _ib_exc:
+        logger.debug(f"ib_insync patchAsyncio skipped (ib_insync not installed?): {_ib_exc}")
     
     # Initialize database and ensure admin user exists
     try:

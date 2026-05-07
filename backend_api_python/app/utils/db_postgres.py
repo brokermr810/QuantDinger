@@ -240,6 +240,9 @@ class PostgresCursor:
     def __init__(self, cursor):
         self._cursor = cursor
         self._last_insert_id = None
+        # INSERT ... RETURNING: execute() peeks the first row for lastrowid; callers
+        # that also cur.fetchone() must see the same row (not a second fetch from PG).
+        self._buffered_row: Optional[Dict[str, Any]] = None
     
     def _convert_placeholders(self, query: str) -> str:
         """
@@ -271,6 +274,8 @@ class PostgresCursor:
         query = self._convert_placeholders(query)
         if args is not None and not isinstance(args, (tuple, list)):
             args = (args,)
+
+        self._buffered_row = None
 
         is_insert = query.strip().upper().startswith('INSERT')
         has_returning = 'RETURNING' in query.upper()
@@ -330,15 +335,22 @@ class PostgresCursor:
         if is_insert and has_returning:
             try:
                 row = self._cursor.fetchone()
-                if row and 'id' in row:
-                    self._last_insert_id = row['id']
+                if row is not None:
+                    self._buffered_row = row if isinstance(row, dict) else dict(row)
+                    if "id" in self._buffered_row:
+                        self._last_insert_id = self._buffered_row["id"]
             except Exception:
+                self._buffered_row = None
                 pass
 
         return result
     
     def fetchone(self) -> Optional[Dict[str, Any]]:
         """Fetch single row"""
+        if self._buffered_row is not None:
+            row = self._buffered_row
+            self._buffered_row = None
+            return row
         row = self._cursor.fetchone()
         if row is None:
             return None

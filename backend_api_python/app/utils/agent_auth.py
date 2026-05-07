@@ -149,6 +149,17 @@ def _ensure_schema() -> None:
             logger.warning(f"agent_auth: schema ensure failed (will retry): {exc}")
 
 
+def ensure_agent_gateway_schema() -> None:
+    """Ensure agent gateway tables exist (idempotent).
+
+    Admin JWT routes (e.g. token issuance) bypass ``agent_required``, which
+    normally triggers ``_ensure_schema()`` on first agent call. Without this,
+    a fresh or partially migrated DB can hit ``INSERT`` before tables exist and
+    return an unhandled 500.
+    """
+    _ensure_schema()
+
+
 # ─────────────────────────── token primitives ───────────────────────────
 
 def _hash_token(token: str) -> str:

@@ -162,10 +162,16 @@ def create_credential():
 
         if exchange_id == 'ibkr':
             # Interactive Brokers (US stocks)
+            # clientId must differ from manual /api/ibkr/connect (defaults to 1) or TWS drops one session.
+            _ib_cid = data.get('ibkr_client_id')
+            try:
+                ibkr_client_id = int(_ib_cid) if _ib_cid not in (None, '') else 7
+            except (TypeError, ValueError):
+                ibkr_client_id = 7
             config.update({
                 'ibkr_host': (data.get('ibkr_host') or '127.0.0.1').strip(),
                 'ibkr_port': int(data.get('ibkr_port') or 7497),
-                'ibkr_client_id': int(data.get('ibkr_client_id') or 1),
+                'ibkr_client_id': ibkr_client_id,
                 'ibkr_account': (data.get('ibkr_account') or '').strip()
             })
             hint = f"{config['ibkr_host']}:{config['ibkr_port']}"

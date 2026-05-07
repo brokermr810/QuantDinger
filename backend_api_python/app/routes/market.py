@@ -93,8 +93,8 @@ def get_public_config():
 @market_bp.route('/types', methods=['GET'])
 def get_market_types():
     """Return supported market types for the add-watchlist modal."""
-    # Keep a stable UX order; add CN/HK stocks near US stocks.
-    desired_order = ['USStock', 'CNStock', 'HKStock', 'MOEX', 'Crypto', 'Forex', 'Futures']
+    # Keep a stable UX order; CN/HK near US; MOEX last (niche vs crypto/FX/futures).
+    desired_order = ['USStock', 'CNStock', 'HKStock', 'Crypto', 'Forex', 'Futures', 'MOEX']
     order_rank = {v: i for i, v in enumerate(desired_order)}
 
     def _normalize_item(x):

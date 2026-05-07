@@ -10,6 +10,7 @@ Supports:
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict, Optional, Union
 
 logger = logging.getLogger(__name__)
@@ -291,8 +292,13 @@ def create_ibkr_client(exchange_config: Dict[str, Any]):
     exchange_config should contain:
     - ibkr_host: TWS/Gateway host (default: 127.0.0.1)
     - ibkr_port: TWS/Gateway port (default: 7497)
-    - ibkr_client_id: Client ID (default: 1)
+    - ibkr_client_id: Client ID (see below — must not collide with /api/ibkr UI)
     - ibkr_account: Account ID (optional, auto-select if empty)
+
+    TWS allows one TCP session per clientId. The admin UI ``POST /api/ibkr/connect``
+    defaults to clientId=1; live orders therefore default to ``IBKR_ORDER_CLIENT_ID``
+    (7) when credentials omit ibkr_client_id, so manual testing does not evict the worker
+    (and vice versa).
     """
     global IBKRClient, IBKRConfig
 
@@ -307,8 +313,22 @@ def create_ibkr_client(exchange_config: Dict[str, Any]):
 
     host = str(exchange_config.get("ibkr_host") or "127.0.0.1").strip()
     port = int(exchange_config.get("ibkr_port") or 7497)
-    client_id = int(exchange_config.get("ibkr_client_id") or 1)
+    default_order_cid = int(os.getenv("IBKR_ORDER_CLIENT_ID", "7"))
+    _cid_raw = exchange_config.get("ibkr_client_id")
+    if _cid_raw is None or (isinstance(_cid_raw, str) and not str(_cid_raw).strip()):
+        client_id = default_order_cid
+    else:
+        try:
+            client_id = int(_cid_raw)
+        except (TypeError, ValueError):
+            client_id = default_order_cid
     account = str(exchange_config.get("ibkr_account") or "").strip()
+
+    if client_id == 1:
+        logger.warning(
+            "IBKR strategy/order client uses clientId=1 — same default as POST /api/ibkr/connect; "
+            "TWS will drop the other session. Prefer ibkr_client_id=7 or IBKR_ORDER_CLIENT_ID."
+        )
 
     config = IBKRConfig(
         host=host,

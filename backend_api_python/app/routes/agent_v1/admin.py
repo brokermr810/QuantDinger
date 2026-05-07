@@ -30,7 +30,11 @@ import os
 from datetime import datetime, timedelta
 
 from app.utils.agent_auth import (
-    ALL_SCOPES, generate_token, parse_csv_list, parse_scopes,
+    ALL_SCOPES,
+    ensure_agent_gateway_schema,
+    generate_token,
+    parse_csv_list,
+    parse_scopes,
 )
 from app.utils.auth import admin_required, get_current_user_id, login_required
 from app.utils.db import get_db_connection
@@ -77,6 +81,7 @@ def issue_token():
       name, scopes (e.g. "R,B"), markets (csv), instruments (csv),
       paper_only (bool), rate_limit_per_min (int), expires_in_days (int)
     """
+    ensure_agent_gateway_schema()
     body, err = get_json_or_400()
     if err:
         return err
@@ -161,6 +166,7 @@ def issue_token():
 @admin_required
 def list_tokens():
     """List tokens for the calling admin's tenant (no secrets)."""
+    ensure_agent_gateway_schema()
     user_id = int(get_current_user_id() or 1)
     with get_db_connection() as db:
         cur = db.cursor()
@@ -185,6 +191,7 @@ def list_tokens():
 @admin_required
 def revoke_token(token_id: int):
     """Revoke a token (sets status='revoked'; cannot be re-activated)."""
+    ensure_agent_gateway_schema()
     user_id = int(get_current_user_id() or 1)
     with get_db_connection() as db:
         cur = db.cursor()
@@ -205,6 +212,7 @@ def revoke_token(token_id: int):
 @admin_required
 def list_audit():
     """Recent audit entries for this tenant (admin only)."""
+    ensure_agent_gateway_schema()
     user_id = int(get_current_user_id() or 1)
     try:
         limit = max(1, min(int(request.args.get("limit") or 100), 500))

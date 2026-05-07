@@ -27,6 +27,15 @@ Or the dependency is already in `requirements.txt`.
 4. Set Socket port (refer to the table above)
 5. Click Apply / OK
 
+### Client ID (important)
+
+Interactive Brokers allows **one API connection per `clientId`**. If two programs use the same id, **the newer connection replaces the older** — often within a few seconds it looks like a random disconnect, and live orders then fail with “Failed to connect”.
+
+- `POST /api/ibkr/connect` (admin UI test) defaults to **clientId=1**.
+- Strategy / live-order clients use **`ibkr_client_id` from credentials** (default **7** when omitted) or env **`IBKR_ORDER_CLIENT_ID`** (default `7`).
+
+Keep manual testing on **1** and automation on **7** (or any other unused id). If you still see drops on Windows, ensure `ib_insync` runs with asyncio patched (QuantDinger calls `util.patchAsyncio()` at app startup).
+
 ## API Endpoints
 
 ### Connection Management
