@@ -2,7 +2,7 @@
 Translate a strategy signal into a direct-exchange order call.
 
 Supports:
-- Crypto exchanges: Binance, OKX, Bitget, Bybit, Coinbase, Kraken, KuCoin, Gate, Deepcoin, HTX
+- Crypto exchanges: Binance, OKX, Bitget, Bybit, Coinbase, Kraken, KuCoin, Gate, Deepcoin, HTX, KTX
 - Traditional brokers: Interactive Brokers (IBKR) for US stocks
 - Forex brokers: MetaTrader 5 (MT5)
 """
@@ -30,6 +30,9 @@ DeepcoinClient = None
 
 # Lazy import HTX
 HtxClient = None
+
+# Lazy import KTX
+KtxClient = None
 
 # Lazy import IBKR
 IBKRClient = None
@@ -275,6 +278,24 @@ def place_order_from_signal(
             pass
 
     if HtxClient is not None and isinstance(client, HtxClient):
+        return client.place_market_order(
+            symbol=symbol,
+            side=side,
+            qty=qty,
+            reduce_only=reduce_only,
+            pos_side=pos_side,
+            client_order_id=client_order_id,
+        )
+
+    global KtxClient
+    if KtxClient is None:
+        try:
+            from app.services.live_trading.ktx import KtxClient as _KtxClient
+            KtxClient = _KtxClient
+        except ImportError:
+            pass
+
+    if KtxClient is not None and isinstance(client, KtxClient):
         return client.place_market_order(
             symbol=symbol,
             side=side,
