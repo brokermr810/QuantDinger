@@ -51,7 +51,7 @@ _EXCHANGE_TO_MARKET: Dict[str, str] = {
 }
 _CRYPTO_EXCHANGES = {
     "binance", "okx", "bitget", "bybit", "coinbaseexchange",
-    "kraken", "kucoin", "gate", "deepcoin", "htx",
+    "kraken", "kucoin", "gate", "deepcoin", "htx", "ktx",
 }
 
 
