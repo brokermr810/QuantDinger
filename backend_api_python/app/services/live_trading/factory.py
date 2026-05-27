@@ -2,7 +2,7 @@
 Factory for direct exchange clients.
 
 Supports:
-- Crypto exchanges: Binance, OKX, Bitget, Bybit, Coinbase, Kraken, KuCoin, Gate, Deepcoin, HTX
+- Crypto exchanges: Binance, OKX, Bitget, Bybit, Coinbase, Kraken, KuCoin, Gate, Deepcoin, HTX, KTX
 - Traditional brokers: Interactive Brokers (IBKR) for US stocks
 - Forex brokers: MetaTrader 5 (MT5)
 """
@@ -29,6 +29,7 @@ from app.services.live_trading.kucoin import KucoinSpotClient, KucoinFuturesClie
 from app.services.live_trading.gate import GateSpotClient, GateUsdtFuturesClient
 from app.services.live_trading.deepcoin import DeepcoinClient
 from app.services.live_trading.htx import HtxClient
+from app.services.live_trading.ktx import KtxClient
 
 # Lazy import IBKR to avoid ImportError if ib_insync not installed
 IBKRClient = None
@@ -278,6 +279,15 @@ def create_client(exchange_config: Dict[str, Any], *, market_type: str = "swap")
             futures_base_url=futures_url,
             market_type=mt,
             broker_id=broker_id,
+        )
+
+    if exchange_id == "ktx":
+        base_url = _get(exchange_config, "base_url", "baseUrl") or "https://api.ktx.app"
+        return KtxClient(
+            api_key=api_key,
+            secret_key=secret_key,
+            base_url=base_url,
+            market_type=mt,
         )
 
     # Traditional brokers (IBKR for US stocks only)
