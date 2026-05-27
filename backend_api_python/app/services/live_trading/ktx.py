@@ -285,6 +285,18 @@ class KtxClient(BaseRestClient):
     # Market data / account
     # ------------------------------------------------------------------
 
+    def ping(self) -> bool:
+        """Public connectivity check."""
+        try:
+            _ = self._public_request(
+                "GET",
+                "/v1/products",
+                params={"market": self._ktx_market_param()},
+            )
+            return True
+        except Exception:
+            return False
+
     def get_ticker(self, *, symbol: str) -> Dict[str, Any]:
         ktx_sym = to_ktx_symbol(symbol, market_type=self.market_type)
         j = self._public_request(
