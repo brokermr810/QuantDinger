@@ -302,58 +302,122 @@ class CryptoDataSource(BaseDataSource):
 
     def get_ticker(self, symbol: str) -> Dict[str, Any]:
         """
-        Get latest ticker for a crypto symbol via CCXT.
+        Get latest ticker for a crypto symbol.
 
-        Accepts common formats:
-        - BTC/USDT, BTCUSDT, BTC/USDT:USDT
-        - PI, TRX (will be normalized and searched across exchanges)
-        - 自动适配不同交易所的符号格式要求
+        KTX: uses native KtxClient.get_ticker() directly (CCXT has no KTX support).
+        All other exchanges: falls back to CCXT fetch_ticker().
         """
         if not symbol or not symbol.strip():
-            return {'last': 0, 'symbol': symbol}
-        
-        normalized = self._symbol_for_scoped_market(symbol)
+            return {"last": 0, "symbol": symbol}
 
+        # KTX native ticker path — CCXT has no KTX, use the native client directly.
+        if (getattr(self, "_scoped_exchange_id", "") or "").strip().lower() == "ktx":
+            return self._get_ticker_ktx(symbol)
+
+        normalized = self._symbol_for_scoped_market(symbol)
         if not normalized:
             logger.warning(f"Failed to normalize symbol: {symbol}")
-            return {'last': 0, 'symbol': symbol}
-        
-        # 尝试获取 ticker
+            return {"last": 0, "symbol": symbol}
+
+        # Try CCXT
         try:
             ticker = self.exchange.fetch_ticker(normalized)
             if ticker and isinstance(ticker, dict):
                 return ticker
         except Exception as e:
             error_msg = str(e).lower()
-            is_symbol_error = any(keyword in error_msg for keyword in [
-                'does not have market symbol',
-                'symbol not found',
-                'invalid symbol',
-                'market does not exist',
-                'trading pair not found'
-            ])
-            
+            is_symbol_error = any(
+                kw in error_msg
+                for kw in [
+                    "does not have market symbol",
+                    "symbol not found",
+                    "invalid symbol",
+                    "market does not exist",
+                    "trading pair not found",
+                ]
+            )
+
             if is_symbol_error:
-                # 尝试查找替代符号
-                base = normalized.split('/')[0] if '/' in normalized else normalized
+                base = normalized.split("/")[0] if "/" in normalized else normalized
                 if self._ensure_markets_loaded():
                     valid_symbol = self._find_valid_symbol(base)
                     if valid_symbol and valid_symbol != normalized:
                         try:
-                            logger.debug(f"Trying alternative symbol: {valid_symbol} (original: {symbol}, first attempt: {normalized})")
+                            logger.debug(
+                                f"Trying alternative symbol: {valid_symbol} "
+                                f"(original: {symbol}, first attempt: {normalized})"
+                            )
                             ticker = self.exchange.fetch_ticker(valid_symbol)
                             if ticker and isinstance(ticker, dict):
                                 return ticker
                         except Exception as e2:
                             logger.debug(f"Alternative symbol {valid_symbol} also failed: {e2}")
-            
-            # 如果所有尝试都失败，记录警告并返回默认值
+
             logger.warning(
                 f"Symbol '{symbol}' (normalized: {normalized}) not found on {self.exchange.id}. "
                 f"Error: {str(e)[:100]}"
             )
-        
-        return {'last': 0, 'symbol': symbol}
+
+        return {"last": 0, "symbol": symbol}
+
+    def _get_ticker_ktx(self, symbol: str) -> Dict[str, Any]:
+        """
+        Fetch KTX ticker via native KtxClient (no CCXT support for KTX).
+
+        Uses API-key-free public endpoint: GET /api/v1/ticker?market=lpc&symbol=BTC_USDT_SWAP
+        """
+        try:
+            from app.services.live_trading.ktx import KtxClient
+
+            # Resolve market_type from the scoped instance
+            mt = getattr(self, "_scoped_market_type", "swap") or "swap"
+            if mt in ("futures", "future", "perp", "perpetual"):
+                mt = "swap"
+
+            # Try to fetch ticker via native client (uses public endpoint, no auth needed).
+            # Use a lightweight ephemeral client — no keys required for public market data.
+            client = KtxClient(
+                api_key="__placeholder__",
+                secret_key="__placeholder__",
+                market_type=mt,
+            )
+            raw = client.get_ticker(symbol=symbol)
+            if not isinstance(raw, dict) or not raw:
+                return {"last": 0, "symbol": symbol}
+
+            # Normalize KTX ticker response to CCXT-like format for consumers.
+            last = 0.0
+            try:
+                last = float(raw.get("last") or raw.get("lastPrice") or raw.get("price") or 0.0)
+            except Exception:
+                last = 0.0
+
+            change = 0.0
+            change_pct = 0.0
+            try:
+                change = float(raw.get("change") or raw.get("priceChange") or 0.0)
+            except Exception:
+                change = 0.0
+            try:
+                change_pct = float(
+                    raw.get("changePercent") or raw.get("priceChangePercent") or 0.0
+                )
+            except Exception:
+                change_pct = 0.0
+
+            return {
+                "last": last,
+                "change": change,
+                "changePercent": change_pct,
+                "high": float(raw.get("high") or raw.get("highPrice") or raw.get("priceHigh") or 0.0),
+                "low": float(raw.get("low") or raw.get("lowPrice") or raw.get("priceLow") or 0.0),
+                "open": float(raw.get("open") or raw.get("openPrice") or 0.0),
+                "volume": float(raw.get("volume") or raw.get("vol") or 0.0),
+                "symbol": symbol,
+            }
+        except Exception as e:
+            logger.warning(f"KTX ticker fetch failed for {symbol}: {e}")
+            return {"last": 0, "symbol": symbol}
     
     def get_kline(
         self,
