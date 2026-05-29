@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import logging
 import time
 from decimal import Decimal, ROUND_DOWN
@@ -177,7 +178,7 @@ class KtxClient(BaseRestClient):
             }
             status, parsed, text = self._request(method_up, url_path, headers=headers)
         else:
-            body_str = self._json_dumps(json_body) if json_body else ""
+            body_str = json.dumps(json_body, ensure_ascii=False, separators=(",", ":")) if json_body is not None else ""
             message = expire_time + body_str
             sign = self._sign(message)
             headers = {
@@ -200,8 +201,8 @@ class KtxClient(BaseRestClient):
             raise LiveTradingError(f"KTX signed {method_up} {url_path} HTTP {status}: {text[:500]}")
         return parsed if isinstance(parsed, dict) else {"raw": parsed}
 
-    def _ktx_market_param(self) -> str:
-        return "spot" if self.market_type == "spot" else "lpc"
+    def _ktx_market_param(self, market: str = "") -> str:
+        return market or ("spot" if self.market_type == "spot" else "lpc")
 
     # ------------------------------------------------------------------
     # Product metadata / normalization
@@ -297,12 +298,12 @@ class KtxClient(BaseRestClient):
         except Exception:
             return False
 
-    def get_ticker(self, *, symbol: str) -> Dict[str, Any]:
+    def get_ticker(self, *, symbol: str, market: str = "") -> Dict[str, Any]:
         ktx_sym = to_ktx_symbol(symbol, market_type=self.market_type)
         j = self._public_request(
             "GET",
             "/v1/ticker",
-            params={"symbol": ktx_sym, "market": self._ktx_market_param()},
+            params={"symbol": ktx_sym, "market": self._ktx_market_param(market)},
         )
         result = (j.get("result") if isinstance(j, dict) else None) or []
         if isinstance(result, list) and result:
@@ -313,8 +314,8 @@ class KtxClient(BaseRestClient):
         return {}
 
     def get_account(self) -> Dict[str, Any]:
-        """Get wallet account assets (main account)."""
-        return self._signed_request("GET", "/v1/main/accounts")
+        """Get wallet (main) account assets. Spot alias. Uses POST /v1/main/accounts."""
+        return self.get_spot_balance()
 
     def get_balance(self) -> Dict[str, Any]:
         """Get wallet account assets (main account)."""
@@ -368,6 +369,71 @@ class KtxClient(BaseRestClient):
         return [r for r in result if isinstance(r, dict) and r.get("quantity", "0") not in ("", "0")]
 
     # ------------------------------------------------------------------
+    # Spot-only methods
+    # ------------------------------------------------------------------
+
+    def get_spot_balance(self, *, asset: str = "") -> Dict[str, Any]:
+        """
+        Get spot (wallet) account assets via POST /v1/main/accounts.
+
+        Args:
+            asset: Optional asset code (e.g. "BTC", "USDT"). If empty, returns all.
+        """
+        body: Optional[Dict[str, Any]] = None if not asset else {"asset": asset}
+        return self._signed_request("POST", "/v1/main/accounts", json_body=body or {})
+
+    def spot_transfer(self, *, symbol: str, amount: float, direction: str = "WALLET_TRADE") -> Dict[str, Any]:
+        """
+        Transfer assets between wallet and trade accounts.
+
+
+        Args:
+            symbol: Asset code (e.g. "USDT", "BTC").
+            amount: Transfer amount.
+            direction: "WALLET_TRADE" = wallet → trade, "TRADE_WALLET" = trade → wallet.
+        """
+        if direction not in ("WALLET_TRADE", "TRADE_WALLET"):
+            raise LiveTradingError(f"Invalid transfer direction: {direction}")
+        body = {
+            "symbol": str(symbol or "").strip().upper(),
+            "amount": str(amount),
+            "type": direction,
+        }
+        return self._signed_request("POST", "/v1/transfer", json_body=body)
+
+    def get_ledger(
+        self,
+        *,
+        asset: str = "",
+        start_time: int = 0,
+        end_time: int = 0,
+        ledger_type: str = "",
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        """
+        Get account ledger (bill) records: transfers, trades, fees, funding.
+
+        Args:
+            asset: Asset code filter (e.g. "BTC", "USDT").
+            start_time: Earliest record timestamp (ms).
+            end_time: Latest record timestamp (ms).
+            ledger_type: "transfer" | "trade" | "fee" | "rebate" | "funding".
+            limit: Max records (default 100).
+        """
+        params: Dict[str, Any] = {"limit": limit}
+        if asset:
+            params["asset"] = asset
+        if start_time > 0:
+            params["start_time"] = start_time
+        if end_time > 0:
+            params["end_time"] = end_time
+        if ledger_type:
+            params["type"] = ledger_type
+        j = self._signed_request("GET", "/v1/ledgers", params=params)
+        result = (j.get("result") if isinstance(j, dict) else None) or []
+        return result if isinstance(result, list) else []
+
+    # ------------------------------------------------------------------
     # Orders
     # ------------------------------------------------------------------
 
@@ -396,6 +462,7 @@ class KtxClient(BaseRestClient):
             "side": sd,
             "type": "market",
             "amount": self._dec_str(q_dec, strict_precision=qty_precision),
+            "market": self._ktx_market_param(),
         }
         if client_order_id:
             body["client_order_id"] = str(client_order_id)
@@ -447,6 +514,7 @@ class KtxClient(BaseRestClient):
             "amount": self._dec_str(q_dec, strict_precision=qty_precision),
             "price": self._dec_str(p_dec, strict_precision=price_precision),
             "time_in_force": (time_in_force or "GTC").upper(),
+            "market": self._ktx_market_param(),
         }
         if client_order_id:
             body["client_order_id"] = str(client_order_id)
@@ -469,22 +537,24 @@ class KtxClient(BaseRestClient):
         symbol: str,
         order_id: str = "",
         client_order_id: str = "",
+        market: str = "",
     ) -> Dict[str, Any]:
         if not order_id and not client_order_id:
             raise LiveTradingError("KTX get_order requires order_id or client_order_id")
         if order_id:
-            return self._signed_request("GET", f"/v1/orders/{order_id}")
-        # Query by client_order_id via list scan
+            return self._signed_request("GET", f"/v1/order?id={order_id}")
+        # Query by client_order_id via pending orders scan
         ktx_sym = to_ktx_symbol(symbol, market_type=self.market_type)
+        mkt = self._ktx_market_param(market)
         j = self._signed_request(
             "GET",
-            "/v1/orders",
-            params={"symbol": ktx_sym, "limit": 100},
+            "/v1/pending/orders",
+            params={"symbol": ktx_sym, "market": mkt},
         )
         result = (j.get("result") if isinstance(j, dict) else None) or []
         if isinstance(result, list):
             for it in result:
-                if isinstance(it, dict) and str(it.get("client_order_id") or "") == str(client_order_id):
+                if isinstance(it, dict) and str(it.get("clientOrderId") or "") == str(client_order_id):
                     return it
         return {}
 
@@ -494,23 +564,27 @@ class KtxClient(BaseRestClient):
         symbol: str,
         order_id: str = "",
         client_order_id: str = "",
+        market: str = "",
     ) -> Dict[str, Any]:
         if not order_id and not client_order_id:
             raise LiveTradingError("KTX cancel_order requires order_id or client_order_id")
         if order_id:
-            return self._signed_request("DELETE", f"/v1/orders/{order_id}")
+            return self._signed_request("POST", "/v1/order/delete", json_body={"id": order_id, "market": self._ktx_market_param(market)})
         # Resolve client_order_id -> exchange order_id first
-        o = self.get_order(symbol=symbol, client_order_id=client_order_id)
-        oid = str(o.get("id") or "") if isinstance(o, dict) else ""
+        o = self.get_order(symbol=symbol, client_order_id=client_order_id, market=market)
+        oid = str(o.get("orderId") or o.get("id") or "") if isinstance(o, dict) else ""
         if not oid:
             raise LiveTradingError(f"KTX cancel: cannot resolve client_order_id={client_order_id}")
-        return self._signed_request("DELETE", f"/v1/orders/{oid}")
+        return self._signed_request("POST", "/v1/order/delete", json_body={"id": oid, "market": self._ktx_market_param(market)})
 
-    def get_open_orders(self, *, symbol: str = "") -> List[Dict[str, Any]]:
-        params: Dict[str, Any] = {"status": "open"}
+    def get_open_orders(self, *, symbol: str = "", market: str = "") -> List[Dict[str, Any]]:
+        """
+        Get pending (unfilled) orders. market param is REQUIRED by KTX API.
+        """
+        params: Dict[str, Any] = {"market": self._ktx_market_param(market)}
         if symbol:
             params["symbol"] = to_ktx_symbol(symbol, market_type=self.market_type)
-        j = self._signed_request("GET", "/v1/orders", params=params)
+        j = self._signed_request("GET", "/v1/pending/orders", params=params)
         result = (j.get("result") if isinstance(j, dict) else None) or []
         return result if isinstance(result, list) else []
 
@@ -608,29 +682,57 @@ class KtxClient(BaseRestClient):
                 }
             time.sleep(float(poll_interval_sec or 0.5))
 
-    def set_leverage(self, *, symbol: str, leverage: float) -> Dict[str, Any]:
+    def get_history_orders(
+        self,
+        *,
+        symbol: str = "",
+        market: str = "",
+        start_time: int = 0,
+        end_time: int = 0,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
         """
-        Best-effort leverage setter for KTX futures.
+        Get settled/filled/cancelled orders (last 3 months).
+        market is REQUIRED by KTX API.
+        """
+        params: Dict[str, Any] = {
+            "market": self._ktx_market_param(market),
+            "limit": limit,
+        }
+        if symbol:
+            params["symbol"] = to_ktx_symbol(symbol, market_type=self.market_type)
+        if start_time > 0:
+            params["start_time"] = start_time
+        if end_time > 0:
+            params["end_time"] = end_time
+        j = self._signed_request("GET", "/v1/history/orders", params=params)
+        result = (j.get("result") if isinstance(j, dict) else None) or []
+        return result if isinstance(result, list) else []
 
-        KTX (lpc) leverage is configured per-account/per-symbol via ``/papi/v1/trade/leverage``
-        in the public docs. Endpoint payload may differ between deployments — callers should
-        wrap this in ``try/except`` because not all KTX accounts support runtime adjustment.
-        Spot market is a no-op.
+    def set_leverage(self, *, symbol: str, leverage: float, position_id: str = "") -> Dict[str, Any]:
+        """
+        Set leverage for a KTX futures position.
+
+
+        Args:
+            symbol: Trading pair (e.g. "BTC_USDT_SWAP").
+            leverage: Leverage multiplier (e.g. 10 for 10x).
+            position_id: Position ID. If empty, will try to set by symbol (best-effort).
         """
         if self.market_type == "spot":
             return {"skipped": True, "reason": "spot"}
-        try:
-            lev = int(float(leverage or 0))
-        except Exception:
-            lev = 0
+        lev = int(float(leverage or 0))
         if lev <= 0:
             return {"skipped": True, "reason": "invalid_leverage"}
-        ktx_sym = to_ktx_symbol(symbol, market_type=self.market_type)
-        body = {"symbol": ktx_sym, "leverage": lev}
+        if position_id:
+            body = {"positionId": position_id, "leverage": lev}
+        else:
+            ktx_sym = to_ktx_symbol(symbol, market_type=self.market_type)
+            body = {"positionId": position_id, "leverage": lev, "symbol": ktx_sym, "market": "lpc"}
         try:
-            return self._signed_request("POST", "/v1/trade/leverage", json_body=body)
+            return self._signed_request("POST", "/v1/change/leverage", json_body=body)
         except LiveTradingError as e:
-            logger.debug(f"KTX set_leverage best-effort failed: {e}")
+            logger.debug(f"KTX set_leverage failed: {e}")
             return {"skipped": True, "error": str(e)}
 
     def get_fee_rate(self, symbol: str, market_type: str = "swap") -> Optional[Dict[str, float]]:

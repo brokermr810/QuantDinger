@@ -4,10 +4,13 @@ Run KTX client tests without Flask dependency.
 Bypasses app/__init__.py by loading modules directly.
 """
 import sys
+import json
 import importlib.util
 import unittest
 from unittest.mock import patch
 import time
+
+_J = lambda d: json.dumps(d, indent=2, ensure_ascii=False)
 
 # ===================================================================
 # Load modules manually
@@ -246,7 +249,7 @@ class TestKtxRealAPI(unittest.TestCase):
         result = {}
         try:
             result = self.client.get_account()
-            print(f"\n✅ Account: {result}")
+            print(f"\n✅ Account:\n{_J(result)}")
         except Exception as e:
             print(f"\n⚠️ Account 端点错误 (/v1/accounts 404): {e}")
         self.assertIsInstance(result, dict)
@@ -256,13 +259,12 @@ class TestKtxRealAPI(unittest.TestCase):
         print(f"\n✅ Positions ({len(positions)} 个):")
         for p in positions:
             print(f"   symbol={p.get('symbol')}, side={p.get('side')}, size={p.get('size')}, entry={p.get('entry_price')}")
+        print(f"\n   Raw:\n   {_J(positions)}")
         self.assertIsInstance(positions, list)
 
     def test_real_get_positions_single_symbol(self):
         positions = self.client.get_positions(symbol="BTC_USDT_SWAP")
-        print(f"\n✅ Positions (BTC only, {len(positions)} 个):")
-        for p in positions:
-            print(f"   {p}")
+        print(f"\n✅ Positions (BTC only, {len(positions)} 个):\n{_J(positions)}")
         self.assertIsInstance(positions, list)
 
     def test_real_get_ticker(self):
@@ -273,7 +275,7 @@ class TestKtxRealAPI(unittest.TestCase):
     def test_real_get_open_orders(self):
         try:
             orders = self.client.get_open_orders()
-            print(f"\n✅ Open orders: {len(orders)} 个")
+            print(f"\n✅ Open orders ({len(orders)} 个):\n{_J(orders)}")
         except Exception as e:
             print(f"\n⚠️ Open orders 端点错误: {e}")
             orders = []
@@ -281,13 +283,29 @@ class TestKtxRealAPI(unittest.TestCase):
 
     def test_real_get_trade_balance(self):
         result = self.client.get_trade_balance()
-        print(f"\n✅ Trade balance: {result}")
+        print(f"\n✅ Trade balance:\n{_J(result)}")
         self.assertIsInstance(result, dict)
 
     def test_real_get_trade_balance_single_asset(self):
         result = self.client.get_trade_balance(asset="BTC")
-        print(f"\n✅ Trade balance (BTC only): {result}")
+        print(f"\n✅ Trade balance (BTC only):\n{_J(result)}")
         self.assertIsInstance(result, dict)
+
+
+    def test_real_get_spot_balance(self):
+        result = self.client.get_spot_balance()
+        print(f"\n✅ Spot balance:\n{_J(result)}")
+        self.assertIsInstance(result, dict)
+
+    def test_real_get_ledger(self):
+        result = self.client.get_ledger(limit=5)
+        print(f"\n✅ Ledger ({len(result)} records):\n{_J(result)}")
+        self.assertIsInstance(result, list)
+
+    def test_real_get_history_orders(self):
+        result = self.client.get_history_orders(symbol="BTC_USDT", limit=3)
+        print(f"\n✅ History orders ({len(result)} orders):\n{_J(result)}")
+        self.assertIsInstance(result, list)
 
 
 # ===================================================================
