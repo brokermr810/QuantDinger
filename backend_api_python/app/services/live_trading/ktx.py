@@ -27,6 +27,27 @@ from app.services.live_trading.symbols import to_ktx_symbol
 
 logger = logging.getLogger(__name__)
 
+# ------------------------------------------------------------------
+# KTX API constants
+# ------------------------------------------------------------------
+
+# positionMerge – 持仓方向（合约必传）
+POS_MERGE_LONG = "long"       # 合并多仓：开多 / 平多
+POS_MERGE_SHORT = "short"     # 合并空仓：开空 / 平空
+POS_MERGE_NONE = "none"       # 分仓（现货默认 / mini合约）
+
+# marginMethod – 保证金模式（合约必传）
+MARGIN_CROSS = "cross"        # 全仓模式
+MARGIN_ISOLATE = "isolate"    # 逐仓模式
+
+# close – 开平仓标志（合约必传）
+CLOSE_OPEN = False            # 开仓
+CLOSE_CLOSE = True            # 平仓
+
+# market – 市场类型
+MARKET_SPOT = "spot"          # 现货
+MARKET_LPC = "lpc"            # U本位永续
+
 
 class KtxClient(BaseRestClient):
     """KTX direct REST client supporting spot and USDT-M futures."""
@@ -202,7 +223,18 @@ class KtxClient(BaseRestClient):
         return parsed if isinstance(parsed, dict) else {"raw": parsed}
 
     def _ktx_market_param(self, market: str = "") -> str:
-        return market or ("spot" if self.market_type == "spot" else "lpc")
+        return market or (MARKET_SPOT if self.market_type == "spot" else MARKET_LPC)
+
+    def _position_merge(self, side: str) -> str:
+        """Return KTX positionMerge value based on market type and side.
+
+        - Spot: always "none"
+        - Swap buy (open long): "long"
+        - Swap sell (open short): "short"
+        """
+        if self.market_type == "spot":
+            return POS_MERGE_NONE
+        return POS_MERGE_LONG if side == "buy" else POS_MERGE_SHORT
 
     # ------------------------------------------------------------------
     # Product metadata / normalization
@@ -239,25 +271,35 @@ class KtxClient(BaseRestClient):
         if q <= 0:
             return (Decimal("0"), None)
         info = self._get_product(symbol) or {}
-        amount_scale = info.get("amount_scale")
-        min_base_amount = info.get("min_base_amount")
-        step = self._to_dec(amount_scale) if amount_scale else Decimal("0")
+        # KTX uses quantityScale (int), not amount_scale
+        qty_scale_raw = info.get("quantityScale")
+        min_base_amount = info.get("min_base_amount") or info.get("minOrderSize")
+        # amountIncrement is the step, quantityScale is precision
+        step_raw = info.get("quantityIncrement") or info.get("amountIncrement") or "0"
+        step = self._to_dec(step_raw) if step_raw else Decimal("0")
         mn = self._to_dec(min_base_amount) if min_base_amount else Decimal("0")
 
         qty_precision: Optional[int] = None
-        if step > 0:
-            q = self._floor_to_step(q, step)
-            try:
-                step_str = str(step.normalize())
-                if "." in step_str:
-                    qty_precision = len(step_str.split(".")[1])
-                else:
-                    qty_precision = 0
-            except Exception:
-                qty_precision = None
+        if qty_scale_raw is not None:
+            qty_precision = int(qty_scale_raw)
+            # Also apply floor-to-step when we have an increment
+            if step > 0:
+                q = self._floor_to_step(q, step)
 
         if mn > 0 and q < mn:
-            return (Decimal("0"), qty_precision)
+            # KTX minOrderSize only applies to mini contracts;
+            # cross-margin orders can be smaller.  Log a warning
+            # but still allow the order through so the exchange can
+            # validate server-side.
+            import logging
+            logging.getLogger(__name__).warning(
+                f"qty {q} < minOrderSize {mn} for {symbol}; "
+                f"proceeding (exchange will reject if invalid)"
+            )
+
+        # KTX also enforces minOrderValue (minimum notional)
+        # We cannot check this without a price, so we just note it here.
+        # The exchange will reject with -21108 if value < minOrderValue.
         return (q, qty_precision)
 
     def _normalize_price(self, *, symbol: str, price: float) -> Tuple[Decimal, Optional[int]]:
@@ -265,21 +307,17 @@ class KtxClient(BaseRestClient):
         if p <= 0:
             return (Decimal("0"), None)
         info = self._get_product(symbol) or {}
-        price_scale = info.get("price_scale")
-        tick = self._to_dec(price_scale) if price_scale else Decimal("0")
+        # KTX uses priceScale (int), not price_scale
+        price_scale_raw = info.get("priceScale")
+        tick_raw = info.get("priceIncrement") or info.get("price_tick") or "0"
+        tick = self._to_dec(tick_raw) if tick_raw else Decimal("0")
         if tick > 0:
             p = self._floor_to_step(p, tick)
 
         price_precision: Optional[int] = None
-        if tick > 0:
-            try:
-                tick_str = str(tick.normalize())
-                if "." in tick_str:
-                    price_precision = len(tick_str.split(".")[1])
-                else:
-                    price_precision = 0
-            except Exception:
-                price_precision = None
+        if price_scale_raw is not None:
+            price_precision = int(price_scale_raw)
+
         return (p, price_precision)
 
     # ------------------------------------------------------------------
@@ -358,7 +396,7 @@ class KtxClient(BaseRestClient):
             params["market"] = market
         else:
             # Always filter to lpc market for swap/futures mode (otherwise returns ALL markets)
-            params["market"] = "lpc"
+            params["market"] = MARKET_LPC
         if symbol:
             params["symbol"] = symbol
         j = self._signed_request("GET", "/v1/positions", params=params if params else None)
@@ -457,6 +495,10 @@ class KtxClient(BaseRestClient):
         reduce_only: bool = False,
         pos_side: str = "",
         client_order_id: Optional[str] = None,
+        leverage: int = 0,
+        margin_method: str = "",
+        close: bool = False,
+        position_id: str = "",
     ) -> LiveOrderResult:
         ktx_sym = to_ktx_symbol(symbol, market_type=self.market_type)
         sd = (side or "").strip().lower()
@@ -472,17 +514,24 @@ class KtxClient(BaseRestClient):
             "symbol": ktx_sym,
             "side": sd,
             "type": "market",
-            "amount": self._dec_str(q_dec, strict_precision=qty_precision),
+            "quantity": self._dec_str(q_dec, strict_precision=qty_precision),
             "market": self._ktx_market_param(),
+            "positionMerge": pos_side if pos_side else self._position_merge(sd),
         }
+        if self.market_type == "swap":
+            body["marginMethod"] = margin_method or MARGIN_CROSS
+            body["close"] = close
+        if leverage > 0:
+            body["leverage"] = leverage
+        if position_id:
+            body["positionId"] = position_id
         if client_order_id:
             body["client_order_id"] = str(client_order_id)
 
         raw = self._signed_request("POST", "/v1/order", json_body=body)
         res = raw if isinstance(raw, dict) else {}
-        # Some KTX responses wrap result in "result"
         result = res.get("result") if isinstance(res.get("result"), dict) else res
-        oid = str((result or {}).get("id") or (result or {}).get("client_order_id") or "")
+        oid = str((result or {}).get("orderId") or (result or {}).get("id") or "")
         return LiveOrderResult(
             exchange_id="ktx",
             exchange_order_id=oid,
@@ -502,6 +551,10 @@ class KtxClient(BaseRestClient):
         pos_side: str = "",
         time_in_force: str = "GTC",
         client_order_id: Optional[str] = None,
+        leverage: int = 0,
+        margin_method: str = "",
+        close: bool = False,
+        position_id: str = "",
     ) -> LiveOrderResult:
         ktx_sym = to_ktx_symbol(symbol, market_type=self.market_type)
         sd = (side or "").strip().lower()
@@ -522,18 +575,26 @@ class KtxClient(BaseRestClient):
             "symbol": ktx_sym,
             "side": sd,
             "type": "limit",
-            "amount": self._dec_str(q_dec, strict_precision=qty_precision),
+            "quantity": self._dec_str(q_dec, strict_precision=qty_precision),
             "price": self._dec_str(p_dec, strict_precision=price_precision),
-            "time_in_force": (time_in_force or "GTC").upper(),
+            "timeInForce": (time_in_force or "GTC").lower(),
             "market": self._ktx_market_param(),
+            "positionMerge": pos_side if pos_side else self._position_merge(sd),
         }
+        if self.market_type == "swap":
+            body["marginMethod"] = margin_method or MARGIN_CROSS
+            body["close"] = close
+        if leverage > 0:
+            body["leverage"] = leverage
+        if position_id:
+            body["positionId"] = position_id
         if client_order_id:
             body["client_order_id"] = str(client_order_id)
 
         raw = self._signed_request("POST", "/v1/order", json_body=body)
         res = raw if isinstance(raw, dict) else {}
         result = res.get("result") if isinstance(res.get("result"), dict) else res
-        oid = str((result or {}).get("id") or (result or {}).get("client_order_id") or "")
+        oid = str((result or {}).get("orderId") or (result or {}).get("id") or "")
         return LiveOrderResult(
             exchange_id="ktx",
             exchange_order_id=oid,
@@ -553,7 +614,7 @@ class KtxClient(BaseRestClient):
         if not order_id and not client_order_id:
             raise LiveTradingError("KTX get_order requires order_id or client_order_id")
         if order_id:
-            return self._signed_request("GET", f"/v1/order?id={order_id}")
+            return self._signed_request("GET", "/v1/order", params={"id": order_id})
         # Query by client_order_id via pending orders scan
         ktx_sym = to_ktx_symbol(symbol, market_type=self.market_type)
         mkt = self._ktx_market_param(market)
