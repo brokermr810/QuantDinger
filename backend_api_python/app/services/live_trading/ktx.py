@@ -60,6 +60,8 @@ class KtxClient(BaseRestClient):
         base_url: str = "https://api.ktx.app",
         timeout_sec: float = 15.0,
         market_type: str = "swap",  # "spot" or "swap"
+        leverage: int = 0,
+        margin_method: str = "",
     ):
         super().__init__(base_url=base_url.rstrip("/"), timeout_sec=timeout_sec)
         self.api_key = (api_key or "").strip()
@@ -70,6 +72,12 @@ class KtxClient(BaseRestClient):
         if mt not in ("spot", "swap"):
             mt = "swap"
         self.market_type = mt
+
+        # Contract defaults – stored on the client so callers (execution.py,
+        # pending_order_worker.py) use the same generic interface as other exchanges.
+        self.default_leverage = int(leverage) if leverage and int(leverage) > 0 else 0
+        mm = (margin_method or "").strip().lower()
+        self.default_margin_method = mm if mm in (MARGIN_CROSS, MARGIN_ISOLATE) else MARGIN_CROSS
 
         if not self.api_key or not self.secret_key:
             raise LiveTradingError("Missing KTX api_key/secret_key")
@@ -355,22 +363,40 @@ class KtxClient(BaseRestClient):
         """Get wallet (main) account assets via POST /v1/main/accounts."""
         return self.get_wallet_balance()
 
-    def get_balance(self) -> Dict[str, Any]:
-        """Get wallet account assets (main account)."""
-        return self.get_account()
+    def get_balance(self, *, asset: str = "") -> Dict[str, Any]:
+        """Get trade account assets (futures/spot collateral).
+
+        This reads from /v1/trade/accounts – the account used for actual
+        trading – consistent with other exchanges' ``get_balance()`` semantics.
+        """
+        return self.get_trade_balance(asset=asset)
 
     def get_trade_balance(self, *, asset: str = "") -> Dict[str, Any]:
-        """
-        Get trade account assets (futures/margin collateral).
+        """Get trade account assets (futures/margin/spot collateral) via GET /v1/trade/accounts.
 
         Args:
-            asset: Optional asset code (e.g. "BTC", "USDT"). 
+            asset: Optional asset code (e.g. "BTC", "USDT").
                    If empty, returns all assets.
         """
         params: Dict[str, Any] = {}
         if asset:
             params["asset"] = asset
         return self._signed_request("GET", "/v1/trade/accounts", params=params if params else None)
+
+    def get_wallet_balance(self, *, asset: str = "") -> Dict[str, Any]:
+        """Get wallet (main) account assets via POST /v1/main/accounts.
+
+        This is separate from the trade account. In KTX unified account mode,
+        both spot and futures assets live in /v1/trade/accounts.
+        The main/wallet account holds assets not yet transferred to the trade account.
+        Use ``get_balance()`` (which reads /v1/trade/accounts) for the standard
+        trading-balance query.
+
+        Args:
+            asset: Optional asset code (e.g. "BTC", "USDT"). If empty, returns all.
+        """
+        body: Dict[str, Any] = {"asset": asset} if asset else {}
+        return self._signed_request("POST", "/v1/main/accounts", json_body=body)
 
     def get_positions(
         self,
@@ -410,26 +436,11 @@ class KtxClient(BaseRestClient):
     # Spot-only methods
     # ------------------------------------------------------------------
 
-    def get_wallet_balance(self, *, asset: str = "") -> Dict[str, Any]:
-        """
-        Get wallet (main) account assets via POST /v1/main/accounts.
-
-        This is separate from the trade account. In KTX unified account mode,
-        both spot and futures assets live in /v1/trade/accounts.
-        The main/wallet account holds assets not yet transferred to the trade account.
-
-        Args:
-            asset: Optional asset code (e.g. "BTC", "USDT"). If empty, returns all.
-        """
-        body: Dict[str, Any] = {"asset": asset} if asset else {}
-        return self._signed_request("POST", "/v1/main/accounts", json_body=body)
-
     def get_spot_balance(self, *, asset: str = "") -> Dict[str, Any]:
-        """
-        Alias for get_trade_balance(). In KTX unified account mode,
+        """Alias for get_balance(). In KTX unified account mode,
         spot assets are in the trade account (/v1/trade/accounts).
         """
-        return self.get_trade_balance(asset=asset)
+        return self.get_balance(asset=asset)
 
     def spot_transfer(self, *, symbol: str, amount: float, direction: str = "WALLET_TRADE") -> Dict[str, Any]:
         """
@@ -486,6 +497,29 @@ class KtxClient(BaseRestClient):
     # Orders
     # ------------------------------------------------------------------
 
+    def _resolve_position_id(self, symbol: str, pos_side: str) -> str:
+        """Best-effort lookup of positionId for close/reduce orders.
+
+        When ``reduce_only`` is True the KTX API requires ``positionId`` so it
+        knows *which* position to close.  We query ``get_positions`` for the
+        matching symbol and direction.
+        """
+        ktx_sym = to_ktx_symbol(symbol, market_type=self.market_type)
+        try:
+            positions = self.get_positions(symbol=ktx_sym)
+        except Exception:
+            return ""
+        target_side = (pos_side or "").strip().lower()
+        for p in positions:
+            if not isinstance(p, dict):
+                continue
+            p_side = str(p.get("side", "")).strip().lower()
+            if p_side == target_side:
+                pid = str(p.get("id", "")).strip()
+                if pid:
+                    return pid
+        return ""
+
     def place_market_order(
         self,
         *,
@@ -495,10 +529,6 @@ class KtxClient(BaseRestClient):
         reduce_only: bool = False,
         pos_side: str = "",
         client_order_id: Optional[str] = None,
-        leverage: int = 0,
-        margin_method: str = "",
-        close: bool = False,
-        position_id: str = "",
     ) -> LiveOrderResult:
         ktx_sym = to_ktx_symbol(symbol, market_type=self.market_type)
         sd = (side or "").strip().lower()
@@ -519,12 +549,16 @@ class KtxClient(BaseRestClient):
             "positionMerge": pos_side if pos_side else self._position_merge(sd),
         }
         if self.market_type == "swap":
-            body["marginMethod"] = margin_method or MARGIN_CROSS
-            body["close"] = close
-        if leverage > 0:
-            body["leverage"] = leverage
-        if position_id:
-            body["positionId"] = position_id
+            body["marginMethod"] = self.default_margin_method
+            body["close"] = CLOSE_CLOSE if reduce_only else CLOSE_OPEN
+            if reduce_only:
+                # KTX requires positionId for close orders – auto-resolve it.
+                resolved_pos = pos_side if pos_side else (POS_MERGE_LONG if sd == "sell" else POS_MERGE_SHORT)
+                pid = self._resolve_position_id(symbol, resolved_pos)
+                if pid:
+                    body["positionId"] = pid
+        if self.default_leverage > 0:
+            body["leverage"] = self.default_leverage
         if client_order_id:
             body["client_order_id"] = str(client_order_id)
 
@@ -551,10 +585,6 @@ class KtxClient(BaseRestClient):
         pos_side: str = "",
         time_in_force: str = "GTC",
         client_order_id: Optional[str] = None,
-        leverage: int = 0,
-        margin_method: str = "",
-        close: bool = False,
-        position_id: str = "",
     ) -> LiveOrderResult:
         ktx_sym = to_ktx_symbol(symbol, market_type=self.market_type)
         sd = (side or "").strip().lower()
@@ -582,12 +612,16 @@ class KtxClient(BaseRestClient):
             "positionMerge": pos_side if pos_side else self._position_merge(sd),
         }
         if self.market_type == "swap":
-            body["marginMethod"] = margin_method or MARGIN_CROSS
-            body["close"] = close
-        if leverage > 0:
-            body["leverage"] = leverage
-        if position_id:
-            body["positionId"] = position_id
+            body["marginMethod"] = self.default_margin_method
+            body["close"] = CLOSE_CLOSE if reduce_only else CLOSE_OPEN
+            if reduce_only:
+                # KTX requires positionId for close orders – auto-resolve it.
+                resolved_pos = pos_side if pos_side else (POS_MERGE_LONG if sd == "sell" else POS_MERGE_SHORT)
+                pid = self._resolve_position_id(symbol, resolved_pos)
+                if pid:
+                    body["positionId"] = pid
+        if self.default_leverage > 0:
+            body["leverage"] = self.default_leverage
         if client_order_id:
             body["client_order_id"] = str(client_order_id)
 
@@ -699,7 +733,8 @@ class KtxClient(BaseRestClient):
             status = str(order.get("status") or order.get("state") or "").lower()
             try:
                 filled = float(
-                    order.get("filled_amount")
+                    order.get("executedQty")
+                    or order.get("filled_amount")
                     or order.get("deal_amount")
                     or order.get("executed_amount")
                     or order.get("filled")
@@ -709,26 +744,40 @@ class KtxClient(BaseRestClient):
                 filled = 0.0
             try:
                 avg_price = float(
-                    order.get("average_price")
+                    order.get("executedCost")
+                    or order.get("average_price")
                     or order.get("avg_price")
                     or order.get("price_avg")
                     or order.get("deal_avg_price")
                     or 0.0
                 )
+                # executedCost is total cost, not avg price; derive avg_price from filled
+                if avg_price > 0 and filled > 0:
+                    # If executedCost looks like total cost (value > price range), convert
+                    raw_ep = order.get("average_price") or order.get("avg_price") or order.get("price_avg")
+                    if not raw_ep:
+                        avg_price = avg_price / filled
             except Exception:
                 avg_price = 0.0
             try:
-                fee = abs(
-                    float(
-                        order.get("fee")
-                        or order.get("fee_amount")
-                        or order.get("deal_fee")
-                        or 0.0
+                # KTX fees is a list of dicts with "fee"/"feeCoin" keys
+                raw_fees = order.get("fees")
+                if isinstance(raw_fees, list) and raw_fees:
+                    fee = abs(sum(float(f.get("fee", 0)) for f in raw_fees if isinstance(f, dict)))
+                    fee_ccy = str(raw_fees[0].get("feeCoin", "")) if isinstance(raw_fees[0], dict) else ""
+                else:
+                    fee = abs(
+                        float(
+                            order.get("fee")
+                            or order.get("fee_amount")
+                            or order.get("deal_fee")
+                            or 0.0
+                        )
                     )
-                )
+                    fee_ccy = str(order.get("fee_currency") or order.get("fee_ccy") or "")
             except Exception:
                 fee = 0.0
-            fee_ccy = str(order.get("fee_currency") or order.get("fee_ccy") or "")
+                fee_ccy = ""
             terminal = status in ("filled", "cancelled", "canceled", "rejected", "expired")
             if (filled > 0 and avg_price > 0) or terminal:
                 # Wait one extra poll if fee not yet reported but we still have time.

@@ -573,23 +573,15 @@ class PendingOrderWorker:
                                     pass
 
                     elif isinstance(client, KtxClient) and market_type == "swap":
-                        # KTX (lpc) positions. Field names follow public docs and may need
-                        # adjustment after live testing with real account responses.
                         positions = client.get_positions()
                         if isinstance(positions, list):
                             for p in positions:
                                 if not isinstance(p, dict):
                                     continue
                                 sym = str(p.get("symbol") or "").strip().upper()
-                                side0 = str(p.get("side") or p.get("position_side") or "").strip().lower()
+                                side0 = str(p.get("side") or "").strip().lower()
                                 try:
-                                    sz = float(
-                                        p.get("amount")
-                                        or p.get("size")
-                                        or p.get("position")
-                                        or p.get("qty")
-                                        or 0.0
-                                    )
+                                    sz = float(p.get("quantity") or 0.0)
                                 except Exception:
                                     sz = 0.0
                                 if not sym or abs(sz) <= 0:
@@ -606,13 +598,7 @@ class PendingOrderWorker:
                                 )
                                 exch_size.setdefault(hb_sym, {"long": 0.0, "short": 0.0})[side] = abs(float(sz))
                                 try:
-                                    ep = float(
-                                        p.get("entry_price")
-                                        or p.get("avg_price")
-                                        or p.get("average_price")
-                                        or p.get("open_price")
-                                        or 0.0
-                                    )
+                                    ep = float(p.get("entryPrice") or 0.0)
                                     if ep > 0:
                                         exch_entry_price.setdefault(hb_sym, {"long": 0.0, "short": 0.0})[side] = ep
                                 except Exception:

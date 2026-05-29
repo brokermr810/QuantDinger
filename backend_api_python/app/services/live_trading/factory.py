@@ -283,11 +283,21 @@ def create_client(exchange_config: Dict[str, Any], *, market_type: str = "swap")
 
     if exchange_id == "ktx":
         base_url = _get(exchange_config, "base_url", "baseUrl") or "https://api.ktx.app"
+        _ktx_lev = _get(exchange_config, "leverage") or 0
+        try:
+            _ktx_lev = int(float(_ktx_lev))
+        except (TypeError, ValueError):
+            _ktx_lev = 0
+        _ktx_margin = str(
+            _get(exchange_config, "margin_method", "marginMethod", "margin_mode", "marginMode") or ""
+        ).strip().lower()
         return KtxClient(
             api_key=api_key,
             secret_key=secret_key,
             base_url=base_url,
             market_type=mt,
+            leverage=_ktx_lev if _ktx_lev > 0 else 0,
+            margin_method=_ktx_margin,
         )
 
     # Traditional brokers (IBKR for US stocks only)

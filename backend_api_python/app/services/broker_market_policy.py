@@ -29,7 +29,7 @@ from typing import Dict, Optional, Set
 # Each is assumed to support both spot and swap unless noted otherwise.
 _CRYPTO_EXCHANGES_SPOT_AND_SWAP: Set[str] = {
     "binance", "okx", "bitget", "bybit",
-    "kraken", "kucoin", "gate", "deepcoin", "htx",
+    "kraken", "kucoin", "gate", "deepcoin", "htx", "ktx",
 }
 # Coinbase Exchange API is institutional spot-only on our side.
 _CRYPTO_EXCHANGES_SPOT_ONLY: Set[str] = {"coinbaseexchange"}
