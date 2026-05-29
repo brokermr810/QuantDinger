@@ -355,15 +355,17 @@ class KtxClient(BaseRestClient):
             params["position_id"] = position_id
         if market:
             params["market"] = market
-        elif self.market_type == "swap":
+        else:
+            # Always filter to lpc market for swap/futures mode (otherwise returns ALL markets)
             params["market"] = "lpc"
         if symbol:
             params["symbol"] = symbol
         j = self._signed_request("GET", "/v1/positions", params=params if params else None)
         result = (j.get("result") if isinstance(j, dict) else None) or []
         if isinstance(result, dict):
-            return [result] if result else []
-        return result if isinstance(result, list) else []
+            result = [result] if result else []
+        # Filter out zero-size position slots (KTX returns closed slots with quantity=0)
+        return [r for r in result if isinstance(r, dict) and r.get("quantity", "0") not in ("", "0")]
 
     # ------------------------------------------------------------------
     # Orders
