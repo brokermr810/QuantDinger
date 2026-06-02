@@ -729,6 +729,7 @@ class BacktestService:
                 mtf_requested=True,
                 mtf_active=True,
             )
+            result['logs'] = signals.get('logs', [])
             self._attach_actual_range_to_result(result, df_signal)
             logger.info("Backtest result formatted successfully")
         except Exception as e:
@@ -2444,8 +2445,10 @@ class BacktestService:
                     volume=float(row.get('volume') or 0),
                     timestamp=row.get('time')
                 )
-                on_bar(ctx, bar)
-
+                try:
+                    on_bar(ctx, bar)
+                except Exception as e:
+                    ctx.log(traceback.format_exc())
                 for order in ctx._orders:
                     action = str(order.get('action') or '').lower()
                     intent = str(order.get('intent') or 'auto').lower()
