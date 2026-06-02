@@ -1774,6 +1774,7 @@ class BacktestService:
         ea['fillRule'] = 'next_bar_open'
         result['executionAssumptions'] = ea
         self._attach_actual_range_to_result(result, df)
+        result['logs'] = signals.get('logs', [])
         return result
     
     def run_code_strategy(
@@ -2008,7 +2009,7 @@ class BacktestService:
         if df.empty:
             raise ValueError("No candle data available in the backtest date range")
         
-        
+
         # 2. Execute indicator code to get signals (pass backtest params)
         backtest_params = {
             'leverage': leverage,
@@ -2524,6 +2525,7 @@ class BacktestService:
                 'close_short': close_short,
                 'add_long': add_long,
                 'add_short': add_short,
+                'logs': ctx.flush_logs(),
             }
         except Exception as e:
             logger.error(f"Strategy script execution error: {e}")
