@@ -9,6 +9,7 @@ import json
 import re
 import traceback
 import time
+import os
 
 from app.services.strategy import StrategyService
 from app.services.strategy_compiler import StrategyCompiler
@@ -1989,6 +1990,7 @@ def ai_generate_strategy():
         payload = request.get_json() or {}
         lang = _request_lang()
         prompt = payload.get('prompt', '')
+        language_prompt = f"The comments in the code should be in {payload.get('language', 'English')}"
         if not prompt.strip():
             return jsonify({'code': '', 'msg': _strategy_ai_text('prompt_empty', lang), 'params': None})
 
@@ -2185,7 +2187,7 @@ def ai_generate_strategy():
 
             content = llm.call_llm_api(
                 messages=[
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": system_prompt+language_prompt},
                     {"role": "user", "content": user_content},
                 ],
                 model=llm.get_code_generation_model(),
@@ -2287,7 +2289,7 @@ Percent parameter convention (IMPORTANT):
 
             content = llm.call_llm_api(
                 messages=[
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": system_prompt+language_prompt},
                     {"role": "user", "content": user_content},
                 ],
                 model=llm.get_code_generation_model(),
@@ -2313,8 +2315,16 @@ Percent parameter convention (IMPORTANT):
             if not isinstance(updates, dict):
                 return jsonify({'code': '', 'params': None, 'msg': _strategy_ai_text('invalid_json_params', lang)})
             return jsonify({'code': '', 'params': updates, 'msg': _strategy_ai_text('success', lang)})
-
-        system_prompt = """You are a quantitative trading strategy code generator.
+        try:
+            _backtest_framework_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                '..', 'services', 'backtest.py'
+            )
+            with open(_backtest_framework_path, 'r', encoding='utf-8') as _f:
+                frame_context = _f.read()
+        except Exception:
+            frame_context = ""
+        system_prompt = f"""You are a quantitative trading strategy code generator.
 Generate Python strategy code that follows this framework:
 - def on_init(ctx): Initialize strategy parameters using ctx.param(name, default)
 - def on_bar(ctx, bar): Core logic called on each K-line bar
@@ -2342,6 +2352,8 @@ Percent / ratio convention:
 - When sizing with ctx.equity * some_pct, keep some_pct as a 0–1 ratio.
 - Template UI may show 0–100; only the Python default literals should be ratios.
 - If user says "80% position", use ctx.param('position_pct', 0.8) and qty = ctx.equity * ctx.position_pct / price.
+Strategy runtime framework context:
+{frame_context}
 """
 
         extra = ''
@@ -2362,7 +2374,7 @@ Percent / ratio convention:
 
         content = llm.call_llm_api(
             messages=[
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": system_prompt+language_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             model=llm.get_code_generation_model(),
@@ -2422,7 +2434,7 @@ Percent / ratio convention:
             )
             repaired_content = llm.call_llm_api(
                 messages=[
-                    {"role": "system", "content": system_prompt},
+                    {"role": "system", "content": system_prompt+language_prompt},
                     {"role": "user", "content": repair_prompt},
                 ],
                 model=llm.get_code_generation_model(),
