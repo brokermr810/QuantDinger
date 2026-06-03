@@ -546,6 +546,7 @@ See full examples:
 | Kraken | Spot, Futures |
 | Gate.io | Spot, Futures |
 | HTX | Spot, USDT-margined perpetuals |
+| KTX | Spot, Futures |
 
 ### Traditional Markets
 
