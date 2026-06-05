@@ -639,6 +639,7 @@ def save_indicator():
                     # 如果之前未发布，现在发布，设置审核状态
                     # 管理员发布的直接通过，普通用户需要待审核
                     new_review_status = 'approved' if is_admin else 'pending'
+                    reviewer_id = user_id if is_admin else None
                     if not was_published:
                         cur.execute(
                             """
@@ -646,25 +647,31 @@ def save_indicator():
                             SET name = ?, code = ?, description = ?,
                                 publish_to_community = ?, pricing_type = ?, price = ?, preview_image = ?,
                                 vip_free = ?, asset_type = ?,
-                                review_status = ?, review_note = '', reviewed_at = NOW(), reviewed_by = ?,
+                                review_status = ?, review_note = '',
+                                reviewed_at = CASE WHEN ? = 'approved' THEN NOW() ELSE NULL END,
+                                reviewed_by = ?,
                                 updatetime = ?, updated_at = NOW()
                             WHERE id = ? AND user_id = ? AND (is_buy IS NULL OR is_buy = 0)
                             """,
                             (name, code, description, publish_to_community, pricing_type, price, preview_image, vip_free, asset_type,
-                             new_review_status, user_id if is_admin else None, now, indicator_id, user_id),
+                             new_review_status, new_review_status, reviewer_id, now, indicator_id, user_id),
                         )
                     else:
-                        # 已发布过的更新，保持原审核状态
+                        # Non-admin updates to published assets require review again.
                         cur.execute(
                             """
                             UPDATE qd_indicator_codes
                             SET name = ?, code = ?, description = ?,
                                 publish_to_community = ?, pricing_type = ?, price = ?, preview_image = ?,
                                 vip_free = ?, asset_type = ?,
+                                review_status = ?, review_note = '',
+                                reviewed_at = CASE WHEN ? = 'approved' THEN NOW() ELSE NULL END,
+                                reviewed_by = ?,
                                 updatetime = ?, updated_at = NOW()
                             WHERE id = ? AND user_id = ? AND (is_buy IS NULL OR is_buy = 0)
                             """,
-                            (name, code, description, publish_to_community, pricing_type, price, preview_image, vip_free, asset_type, now, indicator_id, user_id),
+                            (name, code, description, publish_to_community, pricing_type, price, preview_image, vip_free, asset_type,
+                             new_review_status, new_review_status, reviewer_id, now, indicator_id, user_id),
                         )
                 else:
                     # 取消发布，清除审核状态

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -26,7 +27,6 @@ from app.services.live_trading.records import (
     strategy_allowed_symbols,
 )
 from app.services.live_trading.strategy_position_sync import (
-    apply_exchange_snapshot_to_strategy_ledger,
     strategy_uses_fill_ledger,
 )
 from app.services.live_trading.account_positions import (
@@ -41,6 +41,24 @@ from app.utils.trade_close_reason import is_exit_trade_type
 from app.services.live_trading.position_query import resolve_reduce_only_quantity
 from app.utils.pnl import calc_notional_value
 from app.services.live_trading.base import LiveTradingError
+from app.services.pending_orders.live_order_support import (
+    FillAccumulator,
+    LiveOrderNotifier,
+    LiveOrderRejected,
+    build_live_order_context,
+    console_print,
+    make_client_order_id,
+    signal_to_side_pos_reduce,
+)
+from app.services.pending_orders.live_order_phases import (
+    apply_fill_snapshot,
+    apply_okx_tail_guard,
+    cancel_live_limit_order,
+    maker_limit_price,
+    place_live_limit_order,
+    place_live_market_order,
+    wait_live_order_fill,
+)
 from app.services.live_trading.binance import BinanceFuturesClient
 from app.services.live_trading.binance_spot import BinanceSpotClient
 from app.services.live_trading.okx import OkxClient
@@ -50,13 +68,8 @@ from app.services.live_trading.bybit import BybitClient
 from app.services.live_trading.coinbase_exchange import CoinbaseExchangeClient
 from app.services.live_trading.kraken import KrakenClient
 from app.services.live_trading.kraken_futures import KrakenFuturesClient
-from app.services.live_trading.kucoin import KucoinSpotClient
-from app.services.live_trading.kucoin import KucoinFuturesClient
 from app.services.live_trading.gate import GateSpotClient, GateUsdtFuturesClient
-from app.services.live_trading.deepcoin import DeepcoinClient
 from app.services.live_trading.htx import HtxClient
-from app.services.live_trading.symbols import to_okx_swap_inst_id
-from app.services.live_trading.symbols import to_gate_currency_pair
 from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
 from app.utils.strategy_runtime_logs import append_strategy_log
@@ -77,8 +90,11 @@ AlpacaClient = None
 
 logger = get_logger(__name__)
 
-# PositionSync: one exchange snapshot per credential per TTL window (many strategies
-# often share the same API key — without this we N× get_positions and trigger bans).
+ALPACA_FILL_DELTA_EPSILON = 1e-8
+
+# PositionSync: one exchange snapshot per credential per TTL window. Many
+# strategies can share the same API key, so this avoids repeated get_positions
+# calls that may trigger exchange rate limits.
 _position_sync_snapshot_cache: Dict[
     str, Tuple[float, Dict[str, Dict[str, float]], Dict[str, Dict[str, float]], Dict[str, Dict[str, str]]]
 ] = {}
@@ -187,6 +203,18 @@ def _persist_strategy_fill(
     inst_id: str = "",
 ) -> Tuple[Optional[float], Optional[float]]:
     """Apply fill to L3 snapshot and append L2 trade row."""
+    filled_qty = float(filled or 0.0)
+    avg_px = float(avg_price or 0.0)
+    if abs(filled_qty) <= 1e-12:
+        logger.info(
+            "Skip zero-sized strategy fill: strategy_id=%s symbol=%s signal=%s order_id=%s source=%s",
+            strategy_id,
+            symbol,
+            signal_type,
+            order_id,
+            fill_source,
+        )
+        return profit, matched_entry_price
     leg = resolve_leg_context(
         strategy_id=int(strategy_id),
         symbol=str(symbol or ""),
@@ -200,8 +228,8 @@ def _persist_strategy_fill(
         strategy_id=int(strategy_id),
         symbol=str(symbol or ""),
         signal_type=str(signal_type or ""),
-        filled=float(filled or 0.0),
-        avg_price=float(avg_price or 0.0),
+        filled=filled_qty,
+        avg_price=avg_px,
         leg=leg,
     )
     if profit is None:
@@ -212,8 +240,8 @@ def _persist_strategy_fill(
         strategy_id=int(strategy_id),
         symbol=str(symbol or ""),
         trade_type=str(signal_type or ""),
-        price=float(avg_price or 0.0),
-        amount=float(filled or 0.0),
+        price=avg_px,
+        amount=filled_qty,
         commission=float(commission or 0.0),
         commission_ccy=str(commission_ccy or ""),
         profit=profit,
@@ -328,6 +356,7 @@ class PendingOrderWorker:
 
     def _tick(self) -> None:
         # logger.info(f"[PendingOrderWorker] _tick start. last_sync={self._last_position_sync_ts}")
+        self._sync_alpaca_sent_orders()
         orders = self._fetch_pending_orders(limit=self.batch_size)
         # logger.info(f"[PendingOrderWorker] orders fetched: {len(orders)}")
         if not orders:
@@ -373,7 +402,7 @@ class PendingOrderWorker:
 
         This prevents "ghost positions" when positions are closed externally on the exchange.
         """
-        # 1) Load local positions (filtered if target_strategy_id provided)
+        # 1) Load local positions (filtered if target_strategy_id is provided).
         logger.debug(f"[PositionSync] Entering _sync_positions_best_effort for target={target_strategy_id}")
         with get_db_connection() as db:
             cur = db.cursor()
@@ -387,7 +416,7 @@ class PendingOrderWorker:
             rows = cur.fetchall() or []
             cur.close()
 
-        # [Defect Fix] Removed early return to allow syncing active strategies even if local DB is empty.
+        # Removed early return to allow syncing active strategies even if local DB is empty.
         # if not rows and not target_strategy_id:
         #    return
 
@@ -403,8 +432,8 @@ class PendingOrderWorker:
         # but DB is empty. However, without knowing *which* symbol to check, we can't easily auto-discover 
         # unless we fetch ALL positions from exchange for that strategy.
         # But `load_strategy_configs(sid)` gives us the exchange keys. 
-        # So if target_strategy_id is set but `sid_to_rows` is empty, we SHOULD explicitly add it to `sid_to_rows`
-        # so logic below enters and calls `client.get_positions()`.
+        # If target_strategy_id is set but sid_to_rows is empty, add it so the
+        # logic below still enters and calls client.get_positions().
         if target_strategy_id and target_strategy_id not in sid_to_rows:
              sid_to_rows[target_strategy_id] = []
 
@@ -450,8 +479,8 @@ class PendingOrderWorker:
                         sid,
                     )
                     continue
-                # 修改：即使signal模式，如果指定了target_strategy_id（策略启动时调用），也要同步
-                # 这样可以清理用户在交易所手动平仓但数据库记录还在的"幽灵持仓"
+                # Signal-mode strategies only sync when explicitly targeted.
+                # This catches positions closed manually on the exchange.
                 if exec_mode != "live" and not target_strategy_id:
                     logger.debug(f"[PositionSync] Strategy {sid} skipped: execution_mode='{exec_mode}' (needs 'live' or explicit target)")
                     continue
@@ -459,7 +488,7 @@ class PendingOrderWorker:
                 exchange_config = resolve_exchange_config(sc.get("exchange_config") or {}, user_id=sync_user_id)
                 safe_cfg = safe_exchange_config_for_log(exchange_config)
                 
-                # 检查 exchange_id 是否有效，如果为空或无效则跳过同步（signal模式可能没有配置交易所）
+                # Signal mode may not have an exchange configured.
                 exchange_id = str(exchange_config.get("exchange_id") or "").strip().lower()
                 if not exchange_id:
                     logger.debug(f"[PositionSync] Strategy {sid} skipped: exchange_id is empty (signal mode or no exchange config)")
@@ -519,7 +548,7 @@ class PendingOrderWorker:
                         )
                         continue
 
-                    # 尝试创建客户端，如果失败则跳过（可能是配置错误）
+                    # Try to create the client; skip strategies with invalid exchange config.
                     try:
                         client = create_client(exchange_config, market_type=market_type)
                     except Exception as e:
@@ -681,7 +710,7 @@ class PendingOrderWorker:
                                     pass
 
                     elif isinstance(client, BybitClient) and market_type == "swap":
-                        # Bybit v5 requires symbol or settleCoin — use USDT for full linear book
+                        # Bybit v5 requires symbol or settleCoin; use USDT for full linear book.
                         resp = client.get_positions(settle_coin="USDT")
                         lst = (((resp.get("result") or {}).get("list")) if isinstance(resp, dict) else None) or []
                         if isinstance(lst, list):
@@ -738,38 +767,6 @@ class PendingOrderWorker:
                                     ep = float(p.get("entry_price") or p.get("open_price") or 0.0)
                                     if ep > 0:
                                         exch_entry_price.setdefault(hb_sym, {"long": 0.0, "short": 0.0})[side] = ep
-                                except Exception:
-                                    pass
-
-                    elif isinstance(client, KucoinFuturesClient) and market_type == "swap":
-                        resp = client.get_positions()
-                        data = (resp.get("data") if isinstance(resp, dict) else None) or []
-                        if isinstance(data, list):
-                            for p in data:
-                                if not isinstance(p, dict):
-                                    continue
-                                sym = str(p.get("symbol") or "").strip()
-                                try:
-                                    qty_ct = float(p.get("currentQty") or p.get("quantity") or 0.0)
-                                except Exception:
-                                    qty_ct = 0.0
-                                if not sym or abs(qty_ct) <= 0:
-                                    continue
-                                side = "long" if qty_ct > 0 else "short"
-                                # Convert contracts -> base using multiplier.
-                                qty_base = abs(qty_ct)
-                                try:
-                                    meta = client.get_contract(symbol=sym) or {}
-                                    mult = float(meta.get("multiplier") or meta.get("lotSize") or 0.0)
-                                    if mult > 0:
-                                        qty_base = qty_base * mult
-                                except Exception:
-                                    pass
-                                exch_size.setdefault(sym, {"long": 0.0, "short": 0.0})[side] = float(qty_base)
-                                try:
-                                    ep = float(p.get("avgEntryPrice") or p.get("realLeverage") and float(p.get("posCost") or 0) / max(abs(qty_ct), 1e-12) or 0.0)
-                                    if ep > 0:
-                                        exch_entry_price.setdefault(sym, {"long": 0.0, "short": 0.0})[side] = ep
                                 except Exception:
                                     pass
 
@@ -860,7 +857,7 @@ class PendingOrderWorker:
                         # Alpaca positions cover both US stocks and crypto. The client
                         # already returns a normalized `side` string ("long" / "short")
                         # plus `quantity` and `avgCost`. Crypto symbols come through as
-                        # "BTC/USD" — same format the strategy stores, so no extra
+                        # "BTC/USD" is the same format the strategy stores, so no extra
                         # normalization is needed here.
                         try:
                             positions = client.get_positions() or []
@@ -958,33 +955,10 @@ class PendingOrderWorker:
                 else:
                     logger.info(f"[PositionSync] Strategy {sid} ({safe_cfg.get('exchange_id', 'unknown')}) has NO positions on exchange.")
 
-                # 3) L3 reconcile: upsert allowed strategy symbols from exchange;
-                # delete legs that are flat. Scoped to strategy_allowed_symbols only.
-                try:
-                    written = apply_exchange_snapshot_to_strategy_ledger(
-                        strategy_id=int(sid),
-                        strategy_config={
-                            "symbol": sc.get("symbol"),
-                            "trading_config": sc.get("trading_config") or {},
-                        },
-                        exch_size=exch_size,
-                        exch_entry_price=exch_entry_price,
-                        exch_inst_id=exch_inst_id,
-                        market_type=str(market_type or "swap"),
-                        exchange_config=exchange_config if isinstance(exchange_config, dict) else {},
-                    )
-                    if written:
-                        logger.debug(
-                            "position sync: upserted %s L3 legs for strategy_id=%s",
-                            written,
-                            sid,
-                        )
-                except Exception as l3_err:
-                    logger.warning(
-                        "position sync: L3 ledger apply failed strategy_id=%s: %s",
-                        sid,
-                        l3_err,
-                    )
+                # Keep exchange truth in L1 only. Strategy positions (L3) must be
+                # produced by that strategy's own fills, otherwise two live
+                # strategies sharing ETH/USDT would both inherit the same
+                # exchange account position.
             except Exception as e:
                 msg = str(e)
                 if is_fatal_exchange_error(msg):
@@ -992,6 +966,239 @@ class PendingOrderWorker:
                     auto_stop_live_strategy(int(sid), msg, source="position_sync")
                 else:
                     logger.error(f"position sync: strategy_id={sid} failed: {e}", exc_info=True)
+
+    def _sync_alpaca_sent_orders(self, limit: int = 50) -> None:
+        rows = self._fetch_alpaca_sent_orders(limit=limit)
+        for row in rows:
+            try:
+                self._sync_one_alpaca_sent_order(row)
+            except Exception as e:
+                logger.warning(
+                    "Alpaca fill sync failed: pending_id=%s err=%s",
+                    row.get("id"),
+                    e,
+                )
+
+    def _fetch_alpaca_sent_orders(self, limit: int = 50) -> List[Dict[str, Any]]:
+        try:
+            try:
+                stale_sec = int(self._stale_processing_sec or 0)
+            except Exception:
+                stale_sec = 0
+            if stale_sec > 0:
+                with get_db_connection() as db:
+                    cur = db.cursor()
+                    cur.execute(
+                        """
+                        UPDATE pending_orders
+                        SET status = 'sent',
+                            dispatch_note = 'alpaca_fill_sync:requeued_stale_sync',
+                            updated_at = NOW()
+                        WHERE status = 'syncing'
+                          AND LOWER(COALESCE(exchange_id, '')) = 'alpaca'
+                          AND updated_at < NOW() - (%s * INTERVAL '1 second')
+                        """,
+                        (stale_sec,),
+                    )
+                    db.commit()
+                    cur.close()
+            with get_db_connection() as db:
+                cur = db.cursor()
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM pending_orders
+                    WHERE status = 'sent'
+                      AND LOWER(COALESCE(exchange_id, '')) = 'alpaca'
+                      AND COALESCE(exchange_order_id, '') <> ''
+                    ORDER BY sent_at ASC NULLS FIRST, id ASC
+                    LIMIT %s
+                    """,
+                    (int(limit),),
+                )
+                rows = cur.fetchall() or []
+                cur.close()
+            return rows
+        except Exception as e:
+            logger.warning("fetch_alpaca_sent_orders failed: %s", e)
+            return []
+
+    def _claim_alpaca_sent_order(self, order_id: int) -> Optional[Dict[str, Any]]:
+        """Atomically claim one Alpaca sent order for fill sync."""
+        if int(order_id or 0) <= 0:
+            return None
+        try:
+            with get_db_connection() as db:
+                cur = db.cursor()
+                cur.execute(
+                    """
+                    UPDATE pending_orders
+                    SET status = 'syncing',
+                        dispatch_note = 'alpaca_fill_sync:syncing',
+                        updated_at = NOW()
+                    WHERE id = %s
+                      AND status = 'sent'
+                      AND LOWER(COALESCE(exchange_id, '')) = 'alpaca'
+                      AND COALESCE(exchange_order_id, '') <> ''
+                    RETURNING *
+                    """,
+                    (int(order_id),),
+                )
+                row = cur.fetchone()
+                db.commit()
+                cur.close()
+            return row if isinstance(row, dict) else None
+        except Exception as e:
+            logger.warning("claim_alpaca_sent_order failed: pending_id=%s err=%s", order_id, e)
+            return None
+
+    def _sync_one_alpaca_sent_order(self, row: Dict[str, Any]) -> None:
+        order_id = int(row.get("id") or 0)
+        if order_id <= 0:
+            return
+        claimed = self._claim_alpaca_sent_order(order_id)
+        if not claimed:
+            return
+        row = claimed
+        exchange_order_id = str(row.get("exchange_order_id") or "").strip()
+        if not exchange_order_id:
+            return
+
+        payload = {}
+        payload_json = row.get("payload_json") or ""
+        if isinstance(payload_json, str) and payload_json.strip():
+            try:
+                payload = json.loads(payload_json) or {}
+            except Exception:
+                payload = {}
+
+        strategy_id = int(payload.get("strategy_id") or row.get("strategy_id") or 0)
+        if strategy_id <= 0:
+            return
+
+        sc = load_strategy_configs(strategy_id)
+        exchange_config = resolve_exchange_config(sc.get("exchange_config") or {}, user_id=int(sc.get("user_id") or 1))
+        if str(exchange_config.get("exchange_id") or "").strip().lower() != "alpaca":
+            return
+
+        try:
+            client = create_client(exchange_config)
+        except Exception as e:
+            logger.warning("Alpaca fill sync create_client failed: pending_id=%s err=%s", order_id, e)
+            return
+
+        global AlpacaClient
+        if AlpacaClient is None:
+            try:
+                from app.services.alpaca_trading import AlpacaClient as _AlpacaClient
+                AlpacaClient = _AlpacaClient
+            except Exception:
+                AlpacaClient = None
+        if AlpacaClient is None or not isinstance(client, AlpacaClient):
+            return
+
+        result = client.get_order_status(exchange_order_id)
+        status = str(result.status or "").strip().lower()
+        cumulative_filled = float(result.filled or 0.0)
+        cumulative_avg = float(result.avg_price or 0.0)
+        previous_filled = float(row.get("filled") or 0.0)
+        previous_avg = float(row.get("avg_price") or 0.0)
+        raw_json = json.dumps(result.raw or {}, ensure_ascii=False)
+
+        delta = cumulative_filled - previous_filled
+        if delta > ALPACA_FILL_DELTA_EPSILON and cumulative_avg > 0:
+            delta_avg = cumulative_avg
+            if previous_filled > 0 and previous_avg > 0:
+                delta_notional = cumulative_filled * cumulative_avg - previous_filled * previous_avg
+                if delta_notional > 0:
+                    delta_avg = delta_notional / delta
+
+            signal_type = payload.get("signal_type") or row.get("signal_type")
+            symbol = payload.get("symbol") or row.get("symbol")
+            market_category = str(
+                sc.get("market_category")
+                or (sc.get("trading_config") or {}).get("market_category")
+                or "USStock"
+            )
+            market_type_for_client = "crypto" if market_category.lower() in ("crypto", "cryptocurrency") else "USStock"
+            profit, _matched_entry = _persist_strategy_fill(
+                strategy_id=strategy_id,
+                symbol=str(symbol or ""),
+                signal_type=str(signal_type or ""),
+                filled=float(delta),
+                avg_price=float(delta_avg),
+                exchange_config=exchange_config,
+                market_type=market_type_for_client,
+                order_id=order_id,
+                fill_source="worker_alpaca_fill_sync",
+                close_reason=_trade_close_reason_from_payload(payload, str(signal_type or "")),
+            )
+            _pstr = f", profit={profit:.4f}" if profit is not None else ""
+            append_strategy_log(
+                strategy_id,
+                "trade",
+                f"Alpaca fill synced: {signal_type} {symbol} filled={delta:.6f} @ {delta_avg:.6f}{_pstr}",
+            )
+
+        final_statuses = {"filled", "canceled", "cancelled", "rejected", "expired"}
+        new_status = "sent"
+        if status == "filled":
+            new_status = "filled"
+        elif status in ("canceled", "cancelled"):
+            new_status = "cancelled"
+        elif status in ("rejected", "expired"):
+            new_status = "failed"
+
+        self._update_alpaca_sent_order_snapshot(
+            order_id=order_id,
+            status=new_status,
+            exchange_status=status,
+            filled=cumulative_filled,
+            avg_price=cumulative_avg,
+            exchange_response_json=raw_json,
+            final=status in final_statuses,
+        )
+
+    def _update_alpaca_sent_order_snapshot(
+        self,
+        *,
+        order_id: int,
+        status: str,
+        exchange_status: str,
+        filled: float,
+        avg_price: float,
+        exchange_response_json: str,
+        final: bool,
+    ) -> None:
+        with get_db_connection() as db:
+            cur = db.cursor()
+            cur.execute(
+                """
+                UPDATE pending_orders
+                SET status = %s,
+                    last_error = CASE WHEN %s = 'failed' THEN %s ELSE '' END,
+                    dispatch_note = %s,
+                    filled = %s,
+                    avg_price = %s,
+                    exchange_response_json = %s,
+                    executed_at = CASE WHEN %s THEN NOW() ELSE executed_at END,
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (
+                    str(status or "sent"),
+                    str(status or "sent"),
+                    str(exchange_status or ""),
+                    f"alpaca_fill_sync:{exchange_status or 'unknown'}",
+                    float(filled or 0.0),
+                    float(avg_price or 0.0),
+                    str(exchange_response_json or ""),
+                    bool(final and float(filled or 0.0) > 0),
+                    int(order_id),
+                ),
+            )
+            db.commit()
+            cur.close()
 
     def _fetch_pending_orders(self, limit: int = 50) -> List[Dict[str, Any]]:
         try:
@@ -1180,6 +1387,165 @@ class PendingOrderWorker:
         except Exception:
             return {}
 
+    @staticmethod
+    def _as_float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value)
+        except Exception:
+            return float(default)
+
+    def _estimate_min_order_notional(
+        self,
+        client: Any,
+        *,
+        symbol: str,
+        price: float,
+        market_order: bool = True,
+    ) -> Tuple[float, float]:
+        """Best-effort minQty/minNotional estimate from live client filters."""
+        px = float(price or 0.0)
+        if px <= 0 or client is None:
+            return 0.0, 0.0
+        try:
+            if not hasattr(client, "get_symbol_filters"):
+                return 0.0, 0.0
+            filters = client.get_symbol_filters(symbol=symbol) or {}
+            lot = {}
+            if isinstance(filters.get("MARKET_LOT_SIZE"), dict) and market_order:
+                lot = filters.get("MARKET_LOT_SIZE") or {}
+                try:
+                    if float(lot.get("minQty") or 0) <= 0:
+                        lot = filters.get("LOT_SIZE") or lot
+                except Exception:
+                    pass
+            if not lot and isinstance(filters.get("LOT_SIZE"), dict):
+                lot = filters.get("LOT_SIZE") or {}
+            min_qty = self._as_float((lot or {}).get("minQty"), 0.0)
+
+            min_notional = 0.0
+            notional_filter = filters.get("MIN_NOTIONAL") or filters.get("NOTIONAL") or {}
+            if isinstance(notional_filter, dict):
+                min_notional = self._as_float(
+                    notional_filter.get("notional")
+                    or notional_filter.get("minNotional")
+                    or notional_filter.get("minNotionalValue"),
+                    0.0,
+                )
+            if min_qty > 0:
+                min_notional = max(min_notional, min_qty * px)
+            return max(0.0, min_qty), max(0.0, min_notional)
+        except Exception:
+            return 0.0, 0.0
+
+    def _friendly_order_error(
+        self,
+        error: Any,
+        *,
+        client: Any,
+        exchange_id: str,
+        symbol: str,
+        signal_type: str,
+        amount: float,
+        price: float,
+        payload: Dict[str, Any],
+    ) -> str:
+        raw = str(error or "")
+        lower = raw.lower()
+        is_size_error = bool(
+            re.search(r"below|step|minqty|min qty|minsize|min size|min_notional|minnotional|invalid (qty|quantity|size|amount)", lower)
+        )
+        if not is_size_error:
+            return raw
+
+        px = float(price or payload.get("ref_price") or 0.0)
+        qty = float(amount or 0.0)
+        actual_notional = qty * px if px > 0 else 0.0
+        min_qty, min_notional = self._estimate_min_order_notional(
+            client,
+            symbol=str(symbol or ""),
+            price=px,
+            market_order=True,
+        )
+        sizing = payload.get("sizing") if isinstance(payload, dict) else {}
+        sizing = sizing if isinstance(sizing, dict) else {}
+        source = str(sizing.get("source") or "unknown")
+        entry_pct = sizing.get("entry_pct")
+        capital = sizing.get("initial_capital")
+        leverage = sizing.get("leverage") or payload.get("leverage")
+
+        parts = [
+            raw,
+            (
+                f"实际下单约 {actual_notional:.4f} USDT"
+                if actual_notional > 0
+                else f"实际下单数量 {qty:.12f}"
+            ),
+        ]
+        if min_notional > 0:
+            parts.append(f"按当前价估算至少约 {min_notional:.4f} USDT")
+        elif min_qty > 0:
+            parts.append(f"交易所最小数量约 {min_qty:.12f}")
+        if capital is not None or entry_pct is not None or leverage is not None:
+            parts.append(
+                "sizing="
+                f"capital={self._as_float(capital, 0.0):.4f}, "
+                f"entry_pct={self._as_float(entry_pct, 0.0):.4f}%, "
+                f"leverage={self._as_float(leverage, 1.0):.4f}x, "
+                f"source={source}"
+            )
+        parts.append("请提高投入金额、开仓比例或杠杆，或更换满足最小下单量的标的。")
+        return "；".join(parts)
+
+    def _log_live_order_sizing(
+        self,
+        *,
+        strategy_id: int,
+        client: Any,
+        symbol: str,
+        signal_type: str,
+        reduce_only: bool,
+        amount: float,
+        ref_price: float,
+        leverage: float,
+        payload: Dict[str, Any],
+        phases: Dict[str, Any],
+    ) -> None:
+        if reduce_only or signal_type not in ("open_long", "open_short", "add_long", "add_short"):
+            return
+        try:
+            min_qty, min_notional = self._estimate_min_order_notional(
+                client,
+                symbol=str(symbol or ""),
+                price=float(ref_price or 0.0),
+                market_order=True,
+            )
+            sizing = payload.get("sizing") if isinstance(payload, dict) else {}
+            sizing = sizing if isinstance(sizing, dict) else {}
+            append_strategy_log(
+                strategy_id,
+                "info",
+                (
+                    "Live order sizing: "
+                    f"capital={self._as_float(sizing.get('initial_capital'), 0.0):.4f}, "
+                    f"entry_pct={self._as_float(sizing.get('entry_pct'), 0.0):.4f}%, "
+                    f"leverage={self._as_float(sizing.get('leverage') or leverage, 1.0):.4f}x, "
+                    f"price={float(ref_price or 0.0):.8f}, "
+                    f"final_qty={float(amount or 0.0):.12f}, "
+                    f"min_qty={float(min_qty or 0.0):.12f}, "
+                    f"min_notional={float(min_notional or 0.0):.4f}, "
+                    f"source={sizing.get('source') or 'unknown'}"
+                ),
+            )
+            phases["sizing_check"] = {
+                "amount": float(amount or 0.0),
+                "ref_price": float(ref_price or 0.0),
+                "min_qty": float(min_qty or 0.0),
+                "min_notional": float(min_notional or 0.0),
+                "sizing": sizing,
+            }
+        except Exception:
+            return
+
     def _load_strategy_name(self, strategy_id: int) -> str:
         try:
             with get_db_connection() as db:
@@ -1195,139 +1561,57 @@ class PendingOrderWorker:
         """
         Execute a pending order using direct exchange REST clients (no ccxt).
         """
-        strategy_id = int(payload.get("strategy_id") or order_row.get("strategy_id") or 0)
-        if strategy_id <= 0:
-            self._mark_failed(order_id=order_id, error="missing_strategy_id")
-            return
+        _console_print = console_print
 
-        def _notify_live_best_effort(
-            *,
-            status: str,
-            error: str = "",
-            exchange_id: str = "",
-            exchange_order_id: str = "",
-            price_hint: Optional[float] = None,
-            amount_hint: Optional[float] = None,
-        ) -> None:
-            """
-            Best-effort notifications for live execution.
-
-            Historically this worker only notified in execution_mode='signal'. For real trading ('live'),
-            users still want Telegram/browser alerts. This hook never blocks or changes order status.
-            """
-            try:
-                notification_config = payload.get("notification_config") or {}
-                if (not notification_config) and strategy_id:
-                    notification_config = self._load_notification_config(int(strategy_id))
-                if not notification_config:
-                    return
-
-                strategy_name = str(payload.get("strategy_name") or "").strip()
-                if not strategy_name:
-                    strategy_name = self._load_strategy_name(int(strategy_id)) or f"Strategy_{strategy_id}"
-
-                sym0 = payload.get("symbol") or order_row.get("symbol") or ""
-                sig0 = payload.get("signal_type") or order_row.get("signal_type") or ""
-                ref0 = float(payload.get("ref_price") or payload.get("price") or order_row.get("price") or 0.0)
-                amt0 = float(payload.get("amount") or order_row.get("amount") or 0.0)
-
-                px = float(price_hint) if (price_hint is not None and float(price_hint or 0.0) > 0) else ref0
-                amt = float(amount_hint) if (amount_hint is not None and float(amount_hint or 0.0) > 0) else amt0
-
-                stake_quote = calc_notional_value(float(px or 0.0), float(amt or 0.0)) or float(amt or 0.0)
-                results = self._notifier.notify_signal(
-                    strategy_id=int(strategy_id),
-                    strategy_name=str(strategy_name or ""),
-                    symbol=str(sym0 or ""),
-                    signal_type=str(sig0 or ""),
-                    price=float(px or 0.0),
-                    stake_amount=float(stake_quote),
-                    direction=("short" if "short" in str(sig0 or "").lower() else "long"),
-                    notification_config=notification_config if isinstance(notification_config, dict) else {},
-                    extra={
-                        "pending_order_id": int(order_id),
-                        "mode": "live",
-                        "status": str(status or ""),
-                        "error": str(error or ""),
-                        "exchange_id": str(exchange_id or ""),
-                        "exchange_order_id": str(exchange_order_id or ""),
-                    },
-                )
-                ok_channels = [c for c, r in (results or {}).items() if (r or {}).get("ok")]
-                fail_channels = [c for c, r in (results or {}).items() if not (r or {}).get("ok")]
-                if ok_channels or fail_channels:
-                    logger.info(
-                        f"live notify: pending_id={order_id}, strategy_id={strategy_id}, "
-                        f"ok={','.join(ok_channels) if ok_channels else '-'} "
-                        f"fail={','.join(fail_channels) if fail_channels else '-'}"
-                    )
-            except Exception as e:
-                logger.info(f"live notify skipped/failed: pending_id={order_id}, strategy_id={strategy_id}, err={e}")
-
-        def _console_print(msg: str) -> None:
-            try:
-                print(str(msg or ""), flush=True)
-            except Exception:
-                pass
-
-        signal_type = payload.get("signal_type") or order_row.get("signal_type")
-        symbol = payload.get("symbol") or order_row.get("symbol")
-        amount = float(payload.get("amount") or order_row.get("amount") or 0.0)
-        if not symbol or not signal_type:
-            self._mark_failed(order_id=order_id, error="missing_symbol_or_signal_type")
-            _console_print(f"[worker] order rejected: strategy_id={strategy_id} pending_id={order_id} missing symbol/signal_type")
-            _notify_live_best_effort(status="failed", error="missing_symbol_or_signal_type")
-            append_strategy_log(strategy_id, "error", f"Order rejected: missing symbol or signal_type")
-            return
-
-        cfg = load_strategy_configs(strategy_id)
-        strategy_user_id = int(cfg.get("user_id") or 1)
-        exchange_config = resolve_exchange_config(cfg.get("exchange_config") or {}, user_id=strategy_user_id)
-        safe_cfg = safe_exchange_config_for_log(exchange_config)
-        exchange_id = str(exchange_config.get("exchange_id") or "").strip().lower()
-        market_category = str(cfg.get("market_category") or "Crypto").strip()
-
-        # Pre-resolve market_type / trade_direction / bot_type so we can hand
-        # them to the centralized policy validator. Reading these here also
-        # lets the validator catch e.g. "alpaca + crypto + market_type=swap"
-        # instead of waiting for the broker to reject the order.
-        _pre_market_type = (
-            payload.get("market_type")
-            or order_row.get("market_type")
-            or cfg.get("market_type")
-            or exchange_config.get("market_type")
-            or "swap"
-        )
-        _pre_trading_cfg = cfg.get("trading_config") or {}
-        _pre_trade_direction = _pre_trading_cfg.get("trade_direction")
-        _pre_bot_type = _pre_trading_cfg.get("bot_type")
-
-        # Centralized validation: broker x market x market_type x direction x
-        # bot_type. Same call site that strategy CRUD uses, so an order can
-        # only fail here if the strategy was somehow created before the
-        # policy was tightened, or if the cfg drifted out of sync.
-        from app.services.broker_market_policy import validate_strategy_config
         try:
-            validate_strategy_config(
-                exchange_id=exchange_id,
-                market_category=market_category,
-                market_type=_pre_market_type,
-                trade_direction=_pre_trade_direction,
-                bot_type=_pre_bot_type,
-                require_exchange=True,
+            ctx = build_live_order_context(
+                order_id=order_id,
+                order_row=order_row,
+                payload=payload,
+                load_strategy_configs=load_strategy_configs,
+                resolve_exchange_config=resolve_exchange_config,
+                safe_exchange_config_for_log=safe_exchange_config_for_log,
             )
-        except ValueError as e:
-            err = f"policy_violation:{e}"
-            self._mark_failed(order_id=order_id, error=err)
-            _console_print(f"[worker] order rejected by policy: strategy_id={strategy_id} pending_id={order_id} err={e}")
-            _notify_live_best_effort(status="failed", error=err)
-            append_strategy_log(strategy_id, "error", f"Order rejected: {e}")
+        except LiveOrderRejected as rejected:
+            self._mark_failed(order_id=order_id, error=rejected.error)
+            if rejected.console_message:
+                _console_print(rejected.console_message)
+            if rejected.strategy_id > 0:
+                live_notifier = LiveOrderNotifier(
+                    order_id=order_id,
+                    strategy_id=rejected.strategy_id,
+                    order_row=order_row,
+                    payload=payload,
+                    notifier=self._notifier,
+                    load_notification_config=self._load_notification_config,
+                    load_strategy_name=self._load_strategy_name,
+                )
+                live_notifier.notify(status="failed", error=rejected.error)
+                if rejected.strategy_log:
+                    append_strategy_log(rejected.strategy_id, "error", rejected.strategy_log)
             return
 
-        market_type = (payload.get("market_type") or order_row.get("market_type") or cfg.get("market_type") or exchange_config.get("market_type") or "swap")
-        market_type = str(market_type or "swap").strip().lower()
-        if market_type in ("futures", "future", "perp", "perpetual"):
-            market_type = "swap"
+        strategy_id = ctx.strategy_id
+        signal_type = ctx.signal_type
+        symbol = ctx.symbol
+        amount = ctx.amount
+        cfg = ctx.cfg
+        exchange_config = ctx.exchange_config
+        safe_cfg = ctx.safe_exchange_config
+        exchange_id = ctx.exchange_id
+        market_category = ctx.market_category
+        market_type = ctx.market_type
+
+        live_notifier = LiveOrderNotifier(
+            order_id=order_id,
+            strategy_id=strategy_id,
+            order_row=order_row,
+            payload=payload,
+            notifier=self._notifier,
+            load_notification_config=self._load_notification_config,
+            load_strategy_name=self._load_strategy_name,
+        )
+        _notify_live_best_effort = live_notifier.notify
 
         client = None
         try:
@@ -1410,27 +1694,7 @@ class PendingOrderWorker:
             )
             return
 
-        def _make_client_oid(phase: str = "") -> str:
-            """
-            Build a client order id.
-
-            OKX has strict clOrdId rules (length <= 32, alphanumeric only in practice).
-            We generate a compact, deterministic id per (strategy_id, pending_order_id, phase).
-            """
-            ph = str(phase or "").strip().lower()
-            # Keep ids stable and short.
-            if exchange_id == "okx":
-                base = f"qd{int(strategy_id)}{int(order_id)}{ph}"
-                # Keep only alphanumeric.
-                base = "".join([c for c in base if c.isalnum()])
-                if not base:
-                    base = f"qd{int(strategy_id)}{int(order_id)}"
-                # OKX max length is 32.
-                return base[:32]
-            # Other exchanges are more permissive.
-            return f"qd_{int(strategy_id)}_{int(order_id)}{('_' + ph) if ph else ''}"
-
-        client_oid = _make_client_oid("")
+        client_oid = make_client_order_id(exchange_id=exchange_id, strategy_id=strategy_id, order_id=order_id)
         sig = str(signal_type or "").strip().lower()
         # Spot does not support short signals in this system.
         if market_type == "spot" and "short" in sig:
@@ -1457,21 +1721,7 @@ class PendingOrderWorker:
 
         ref_price = float(payload.get("ref_price") or payload.get("price") or order_row.get("price") or 0.0)
 
-        # Helper: map signal -> side/posSide/reduceOnly
-        # Include stop/tp/trailing exit labels (same exchange side as plain close_*).
-        def _signal_to_side_pos_reduce(sig_type: str):
-            st = (sig_type or "").strip().lower()
-            if st in ("open_long", "add_long"):
-                return "buy", "long", False
-            if st in ("open_short", "add_short"):
-                return "sell", "short", False
-            if st in ("close_long", "reduce_long", "close_long_stop", "close_long_profit", "close_long_trailing"):
-                return "sell", "long", True
-            if st in ("close_short", "reduce_short", "close_short_stop", "close_short_profit", "close_short_trailing"):
-                return "buy", "short", True
-            raise LiveTradingError(f"Unsupported signal_type: {sig_type}")
-
-        side, pos_side, reduce_only = _signal_to_side_pos_reduce(signal_type)
+        side, pos_side, reduce_only = signal_to_side_pos_reduce(signal_type)
 
         from app.services.live_trading.position_query import query_exchange_position_size
 
@@ -1557,33 +1807,7 @@ class PendingOrderWorker:
                 append_strategy_log(strategy_id, "error", f"Binance set leverage failed for {symbol}: {e}")
                 return
 
-        # Accumulate fills across phases
-        total_base = 0.0
-        total_quote = 0.0
-        total_fee = 0.0
-        fee_ccy = ""
-
-        def _apply_fill(filled_qty: float, avg_px: float) -> None:
-            nonlocal total_base, total_quote
-            fq = float(filled_qty or 0.0)
-            px = float(avg_px or 0.0)
-            if fq > 0 and px > 0:
-                total_base += fq
-                total_quote += fq * px
-
-        def _apply_fee(fee: float, ccy: str = "") -> None:
-            nonlocal total_fee, fee_ccy
-            try:
-                fv = abs(float(fee or 0.0))
-            except Exception:
-                fv = 0.0
-            if fv > 0:
-                total_fee += fv
-                if (not fee_ccy) and ccy:
-                    fee_ccy = str(ccy or "")
-
-        def _current_avg() -> float:
-            return float(total_quote / total_base) if total_base > 0 else 0.0
+        fills = FillAccumulator()
 
         # Spot close: cap to exchange free base (fees often make DB size > sellable free).
         if reduce_only and market_type == "spot" and side == "sell":
@@ -1626,6 +1850,19 @@ class PendingOrderWorker:
                     "Spot size prepare failed: pending_id=%s, err=%s", order_id, e
                 )
                 phases["spot_prepare_error"] = str(e)
+
+        self._log_live_order_sizing(
+            strategy_id=strategy_id,
+            client=client,
+            symbol=symbol,
+            signal_type=signal_type,
+            reduce_only=reduce_only,
+            amount=amount,
+            ref_price=ref_price,
+            leverage=leverage,
+            payload=payload,
+            phases=phases,
+        )
 
         # Decide if we should use limit-first flow.
         use_limit_first = order_mode in ("maker", "limit", "limit_first", "maker_then_market")
@@ -1676,20 +1913,30 @@ class PendingOrderWorker:
                 phases["close_size_retry"]["error"] = str(e)
 
         if remaining <= 0 and not (spot_market_buy_uses_quote and spot_quote_amt > 0):
-            self._mark_failed(order_id=order_id, error="invalid_amount")
-            _notify_live_best_effort(status="failed", error="invalid_amount", amount_hint=amount)
+            friendly_error = self._friendly_order_error(
+                "invalid amount",
+                client=client,
+                exchange_id=exchange_id,
+                symbol=symbol,
+                signal_type=signal_type,
+                amount=amount,
+                price=ref_price,
+                payload=payload,
+            )
+            self._mark_failed(order_id=order_id, error=friendly_error)
+            _notify_live_best_effort(status="failed", error=friendly_error, amount_hint=amount)
             if reduce_only:
                 append_strategy_log(
                     strategy_id,
                     "error",
-                    f"Order rejected: invalid amount ({amount}) for {symbol} {signal_type} "
+                    f"Order rejected: {friendly_error} for {symbol} {signal_type} "
                     f"(no position after sync; check exchange/DB alignment)",
                 )
             else:
                 append_strategy_log(
                     strategy_id,
                     "error",
-                    f"Order rejected: invalid amount ({amount}) for {symbol} {signal_type}",
+                    f"Order rejected: {friendly_error} for {symbol} {signal_type}",
                 )
             return
 
@@ -1698,359 +1945,80 @@ class PendingOrderWorker:
         limit_client_oid = ""
         if use_limit_first:
             try:
-                # price adjustment to reduce immediate taker fills (best-effort)
-                limit_price = float(ref_price or 0.0)
-                if limit_price <= 0:
-                    raise LiveTradingError("missing_ref_price_for_limit_order")
-                if side == "buy":
-                    limit_price = limit_price * (1.0 - maker_offset)
-                else:
-                    limit_price = limit_price * (1.0 + maker_offset)
-
-                limit_client_oid = _make_client_oid("lmt")
-                if isinstance(client, BinanceFuturesClient):
-                    res1 = client.place_limit_order(
-                        symbol=str(symbol),
-                        side="BUY" if side == "buy" else "SELL",
-                        quantity=remaining,
-                        price=limit_price,
-                        reduce_only=reduce_only,
-                        position_side=pos_side,
-                        client_order_id=limit_client_oid,
-                    )
-                elif isinstance(client, BinanceSpotClient):
-                    res1 = client.place_limit_order(
-                        symbol=str(symbol),
-                        side="BUY" if side == "buy" else "SELL",
-                        quantity=remaining,
-                        price=limit_price,
-                        client_order_id=limit_client_oid,
-                    )
-                elif isinstance(client, OkxClient):
-                    td_mode = str(payload.get("margin_mode") or payload.get("td_mode") or "cross")
-                    # Ensure leverage is configured for this instrument before placing order.
-                    if market_type == "swap":
-                        try:
-                            inst_id = to_okx_swap_inst_id(str(symbol))
-                            client.set_leverage(inst_id=inst_id, lever=leverage, mgn_mode=td_mode, pos_side=pos_side)
-                        except Exception:
-                            # If leverage set fails, let place_order raise and mark failed.
-                            pass
-                    res1 = client.place_limit_order(
-                        market_type=market_type,
-                        symbol=str(symbol),
-                        side=side,
-                        size=remaining,
-                        price=limit_price,
-                        pos_side=pos_side,
-                        td_mode=td_mode,
-                        reduce_only=reduce_only,
-                        client_order_id=limit_client_oid,
-                    )
-                elif isinstance(client, BitgetMixClient):
-                    product_type = str(exchange_config.get("product_type") or exchange_config.get("productType") or "USDT-FUTURES")
-                    margin_coin = str(exchange_config.get("margin_coin") or exchange_config.get("marginCoin") or "USDT")
-                    margin_mode = str(payload.get("margin_mode") or payload.get("marginMode") or exchange_config.get("margin_mode") or exchange_config.get("marginMode") or "cross")
-                    # Best-effort set leverage for Bitget mix before placing orders (otherwise exchange defaults apply).
-                    try:
-                        if market_type == "swap":
-                            client.set_leverage(
-                                symbol=str(symbol),
-                                leverage=leverage,
-                                margin_coin=margin_coin,
-                                product_type=product_type,
-                                margin_mode=margin_mode,
-                                hold_side=pos_side,
-                            )
-                    except Exception:
-                        pass
-                    res1 = client.place_limit_order(
-                        symbol=str(symbol),
-                        side=side,
-                        size=remaining,
-                        price=limit_price,
-                        margin_coin=margin_coin,
-                        product_type=product_type,
-                        margin_mode=margin_mode,
-                        reduce_only=reduce_only,
-                        post_only=(order_mode in ("maker", "maker_then_market", "limit_first", "limit")),
-                        client_order_id=limit_client_oid,
-                        hold_side=pos_side or ("long" if side == "buy" else "short"),
-                    )
-                elif isinstance(client, BitgetSpotClient):
-                    res1 = client.place_limit_order(
-                        symbol=str(symbol),
-                        side=side,
-                        size=remaining,
-                        price=limit_price,
-                        client_order_id=limit_client_oid,
-                    )
-                elif isinstance(client, BybitClient):
-                    res1 = client.place_limit_order(
-                        symbol=str(symbol),
-                        side=side,
-                        qty=remaining,
-                        price=limit_price,
-                        reduce_only=reduce_only,
-                        pos_side=pos_side,
-                        client_order_id=limit_client_oid,
-                    )
-                elif isinstance(client, CoinbaseExchangeClient):
-                    res1 = client.place_limit_order(
-                        symbol=str(symbol),
-                        side=side,
-                        size=remaining,
-                        price=limit_price,
-                        client_order_id=limit_client_oid,
-                    )
-                elif isinstance(client, KrakenClient):
-                    # Kraken is spot-only and returns txid as order id.
-                    res1 = client.place_limit_order(
-                        symbol=str(symbol),
-                        side=side,
-                        size=remaining,
-                        price=limit_price,
-                        client_order_id=limit_client_oid,
-                    )
-                elif isinstance(client, KrakenFuturesClient):
-                    # Kraken Futures expects instrument symbols; size is treated as contracts in this client.
-                    res1 = client.place_limit_order(
-                        symbol=str(symbol),
-                        side=side,
-                        size=remaining,
-                        price=limit_price,
-                        reduce_only=reduce_only,
-                        post_only=(order_mode in ("maker", "maker_then_market", "limit_first", "limit")),
-                        client_order_id=limit_client_oid,
-                    )
-                elif isinstance(client, KucoinSpotClient):
-                    res1 = client.place_limit_order(
-                        symbol=str(symbol),
-                        side=side,
-                        size=remaining,
-                        price=limit_price,
-                        client_order_id=limit_client_oid,
-                    )
-                elif isinstance(client, KucoinFuturesClient):
-                    try:
-                        if market_type == "swap":
-                            client.set_leverage(symbol=str(symbol), leverage=leverage)
-                    except Exception:
-                        pass
-                    res1 = client.place_limit_order(
-                        symbol=str(symbol),
-                        side=side,
-                        size=remaining,
-                        price=limit_price,
-                        reduce_only=reduce_only,
-                        post_only=(order_mode in ("maker", "maker_then_market", "limit_first", "limit")),
-                        client_order_id=limit_client_oid,
-                    )
-                elif isinstance(client, GateSpotClient):
-                    res1 = client.place_limit_order(
-                        symbol=str(symbol),
-                        side=side,
-                        size=remaining,
-                        price=limit_price,
-                        client_order_id=limit_client_oid,
-                    )
-                elif isinstance(client, GateUsdtFuturesClient):
-                    # Best-effort set leverage before futures order
-                    try:
-                        client.set_leverage(contract=to_gate_currency_pair(str(symbol)), leverage=leverage)
-                    except Exception:
-                        pass
-                    res1 = client.place_limit_order(
-                        symbol=str(symbol),
-                        side=side,
-                        size=remaining,
-                        price=limit_price,
-                        reduce_only=reduce_only,
-                        client_order_id=limit_client_oid,
-                    )
-                elif isinstance(client, DeepcoinClient):
-                    res1 = client.place_limit_order(
-                        symbol=str(symbol),
-                        side=side,
-                        qty=remaining,
-                        price=limit_price,
-                        reduce_only=reduce_only,
-                        pos_side=pos_side,
-                        client_order_id=limit_client_oid,
-                    )
-                elif isinstance(client, HtxClient):
-                    if market_type == "swap":
-                        try:
-                            client.set_leverage(symbol=str(symbol), leverage=leverage)
-                        except Exception:
-                            pass
-                    res1 = client.place_limit_order(
-                        symbol=str(symbol),
-                        side=side,
-                        size=remaining,
-                        price=limit_price,
-                        reduce_only=reduce_only,
-                        pos_side=pos_side,
-                        client_order_id=limit_client_oid,
-                    )
-                else:
-                    raise LiveTradingError(f"Unsupported client type: {type(client)}")
-
+                limit_price = maker_limit_price(ref_price=ref_price, side=side, maker_offset=maker_offset)
+                limit_client_oid = make_client_order_id(
+                    exchange_id=exchange_id,
+                    strategy_id=strategy_id,
+                    order_id=order_id,
+                    phase="lmt",
+                )
+                res1 = place_live_limit_order(
+                    client=client,
+                    symbol=str(symbol),
+                    side=side,
+                    amount=float(remaining or 0.0),
+                    price=float(limit_price or 0.0),
+                    reduce_only=reduce_only,
+                    pos_side=pos_side,
+                    client_order_id=limit_client_oid,
+                    market_type=market_type,
+                    payload=payload,
+                    exchange_config=exchange_config,
+                    leverage=leverage,
+                    order_mode=order_mode,
+                )
                 limit_order_id = str(res1.exchange_order_id or "")
                 phases["limit_place"] = res1.raw
 
-                # Wait for fills
-                if isinstance(client, BinanceFuturesClient):
-                    q = client.wait_for_fill(symbol=str(symbol), order_id=limit_order_id, client_order_id=limit_client_oid, max_wait_sec=maker_wait_sec)
-                    phases["limit_query"] = q
-                    _apply_fill(float(q.get("filled") or 0.0), float(q.get("avg_price") or 0.0))
-                    _apply_fee(float(q.get("fee") or 0.0), str(q.get("fee_ccy") or ""))
-                elif isinstance(client, BinanceSpotClient):
-                    q = client.wait_for_fill(symbol=str(symbol), order_id=limit_order_id, client_order_id=limit_client_oid, max_wait_sec=maker_wait_sec)
-                    phases["limit_query"] = q
-                    _apply_fill(float(q.get("filled") or 0.0), float(q.get("avg_price") or 0.0))
-                    _apply_fee(float(q.get("fee") or 0.0), str(q.get("fee_ccy") or ""))
-                elif isinstance(client, OkxClient):
-                    q = client.wait_for_fill(symbol=str(symbol), ord_id=limit_order_id, cl_ord_id=limit_client_oid, market_type=market_type, max_wait_sec=maker_wait_sec)
-                    phases["limit_query"] = q
-                    _apply_fill(float(q.get("filled") or 0.0), float(q.get("avg_price") or 0.0))
-                    _apply_fee(float(q.get("fee") or 0.0), str(q.get("fee_ccy") or ""))
-                elif isinstance(client, BitgetMixClient):
-                    product_type = str(exchange_config.get("product_type") or exchange_config.get("productType") or "USDT-FUTURES")
-                    # Bitget /mix/order/fills may lag behind order detail; use at least a few seconds for fee capture.
-                    bg_limit_wait = max(float(maker_wait_sec or 0.0), 8.0)
-                    q = client.wait_for_fill(symbol=str(symbol), product_type=product_type, order_id=limit_order_id, client_oid=limit_client_oid, max_wait_sec=bg_limit_wait)
-                    phases["limit_query"] = q
-                    _apply_fill(float(q.get("filled") or 0.0), float(q.get("avg_price") or 0.0))
-                    _apply_fee(float(q.get("fee") or 0.0), str(q.get("fee_ccy") or ""))
-                elif isinstance(client, BitgetSpotClient):
-                    bg_spot_limit_wait = max(float(maker_wait_sec or 0.0), 8.0)
-                    q = client.wait_for_fill(symbol=str(symbol), order_id=limit_order_id, client_order_id=limit_client_oid, max_wait_sec=bg_spot_limit_wait)
-                    phases["limit_query"] = q
-                    _apply_fill(float(q.get("filled") or 0.0), float(q.get("avg_price") or 0.0))
-                    _apply_fee(float(q.get("fee") or 0.0), str(q.get("fee_ccy") or ""))
-                elif isinstance(client, BybitClient):
-                    q = client.wait_for_fill(symbol=str(symbol), order_id=limit_order_id, client_order_id=limit_client_oid, max_wait_sec=maker_wait_sec)
-                    phases["limit_query"] = q
-                    _apply_fill(float(q.get("filled") or 0.0), float(q.get("avg_price") or 0.0))
-                    _apply_fee(float(q.get("fee") or 0.0), str(q.get("fee_ccy") or ""))
-                elif isinstance(client, CoinbaseExchangeClient):
-                    q = client.wait_for_fill(order_id=limit_order_id, client_order_id=limit_client_oid, max_wait_sec=maker_wait_sec)
-                    phases["limit_query"] = q
-                    _apply_fill(float(q.get("filled") or 0.0), float(q.get("avg_price") or 0.0))
-                    _apply_fee(float(q.get("fee") or 0.0), str(q.get("fee_ccy") or ""))
-                elif isinstance(client, KrakenClient):
-                    q = client.wait_for_fill(order_id=limit_order_id, max_wait_sec=maker_wait_sec)
-                    phases["limit_query"] = q
-                    _apply_fill(float(q.get("filled") or 0.0), float(q.get("avg_price") or 0.0))
-                    _apply_fee(float(q.get("fee") or 0.0), str(q.get("fee_ccy") or ""))
-                elif isinstance(client, KrakenFuturesClient):
-                    q = client.wait_for_fill(order_id=limit_order_id, client_order_id=limit_client_oid, max_wait_sec=maker_wait_sec)
-                    phases["limit_query"] = q
-                    _apply_fill(float(q.get("filled") or 0.0), float(q.get("avg_price") or 0.0))
-                    _apply_fee(float(q.get("fee") or 0.0), str(q.get("fee_ccy") or ""))
-                elif isinstance(client, KucoinSpotClient):
-                    q = client.wait_for_fill(order_id=limit_order_id, max_wait_sec=maker_wait_sec)
-                    phases["limit_query"] = q
-                    _apply_fill(float(q.get("filled") or 0.0), float(q.get("avg_price") or 0.0))
-                    _apply_fee(float(q.get("fee") or 0.0), str(q.get("fee_ccy") or ""))
-                elif isinstance(client, KucoinFuturesClient):
-                    q = client.wait_for_fill(order_id=limit_order_id, max_wait_sec=maker_wait_sec)
-                    phases["limit_query"] = q
-                    _apply_fill(float(q.get("filled") or 0.0), float(q.get("avg_price") or 0.0))
-                    _apply_fee(float(q.get("fee") or 0.0), str(q.get("fee_ccy") or ""))
-                elif isinstance(client, GateSpotClient):
-                    gate_spot_limit_wait = max(float(maker_wait_sec or 0.0), 8.0)
-                    q = client.wait_for_fill(order_id=limit_order_id, max_wait_sec=gate_spot_limit_wait)
-                    phases["limit_query"] = q
-                    _apply_fill(float(q.get("filled") or 0.0), float(q.get("avg_price") or 0.0))
-                    _apply_fee(float(q.get("fee") or 0.0), str(q.get("fee_ccy") or ""))
-                elif isinstance(client, GateUsdtFuturesClient):
-                    gate_limit_wait = max(float(maker_wait_sec or 0.0), 8.0)
-                    q = client.wait_for_fill(order_id=limit_order_id, contract=to_gate_currency_pair(str(symbol)), max_wait_sec=gate_limit_wait)
-                    phases["limit_query"] = q
-                    _apply_fill(float(q.get("filled") or 0.0), float(q.get("avg_price") or 0.0))
-                    _apply_fee(float(q.get("fee") or 0.0), str(q.get("fee_ccy") or ""))
-                elif isinstance(client, DeepcoinClient):
-                    q = client.wait_for_fill(symbol=str(symbol), order_id=limit_order_id, client_order_id=limit_client_oid, max_wait_sec=maker_wait_sec)
-                    phases["limit_query"] = q
-                    _apply_fill(float(q.get("filled") or 0.0), float(q.get("avg_price") or 0.0))
-                    _apply_fee(float(q.get("fee") or 0.0), str(q.get("fee_ccy") or ""))
-                elif isinstance(client, HtxClient):
-                    q = client.wait_for_fill(symbol=str(symbol), order_id=limit_order_id, client_order_id=limit_client_oid, max_wait_sec=maker_wait_sec)
-                    phases["limit_query"] = q
-                    _apply_fill(float(q.get("filled") or 0.0), float(q.get("avg_price") or 0.0))
-                    _apply_fee(float(q.get("fee") or 0.0), str(q.get("fee_ccy") or ""))
+                q = wait_live_order_fill(
+                    client=client,
+                    symbol=str(symbol),
+                    order_id=limit_order_id,
+                    client_order_id=limit_client_oid,
+                    market_type=market_type,
+                    exchange_config=exchange_config,
+                    max_wait_sec=maker_wait_sec,
+                    phase="limit",
+                )
+                phases["limit_query"] = q
+                apply_fill_snapshot(fills, q)
 
-                remaining = max(0.0, float(amount or 0.0) - total_base)
+                remaining = max(0.0, float(amount or 0.0) - fills.total_base)
+                remaining = apply_okx_tail_guard(
+                    client=client,
+                    symbol=str(symbol),
+                    remaining=remaining,
+                    market_type=market_type,
+                    phases=phases,
+                )
 
-                # Tail guard: if remaining is below the exchange min tradable amount, do NOT chase it with a market order.
-                # This avoids the common case: limit partially fills, remainder is too small => market phase fails, yet
-                # the exchange already opened a position (user sees "failed" incorrectly).
-                if remaining > 0 and isinstance(client, OkxClient) and market_type == "swap":
-                    try:
-                        inst_id = to_okx_swap_inst_id(str(symbol))
-                        inst = client.get_instrument(inst_type="SWAP", inst_id=inst_id) or {}
-                        lot_sz = float(inst.get("lotSz") or 0.0)  # contracts step
-                        min_sz = float(inst.get("minSz") or 0.0)  # min contracts
-                        ct_val = float(inst.get("ctVal") or 0.0)  # base per contract
-                        # Convert contract min to base min (best-effort)
-                        min_contract = min_sz if min_sz > 0 else (lot_sz if lot_sz > 0 else 0.0)
-                        min_base = (min_contract * ct_val) if (min_contract > 0 and ct_val > 0) else 0.0
-                        if min_base > 0 and remaining < (min_base * 0.999999):
-                            phases["tail_guard"] = {
-                                "exchange": "okx",
-                                "inst_id": inst_id,
-                                "remaining": remaining,
-                                "min_base": min_base,
-                            }
-                            remaining = 0.0
-                    except Exception:
-                        pass
-
-                # Cancel if not fully filled
                 if remaining > max(0.0, float(amount or 0.0) * 0.001):
                     try:
-                        if isinstance(client, BinanceFuturesClient):
-                            phases["limit_cancel"] = client.cancel_order(symbol=str(symbol), order_id=limit_order_id, client_order_id=limit_client_oid)
-                        elif isinstance(client, BinanceSpotClient):
-                            phases["limit_cancel"] = client.cancel_order(symbol=str(symbol), order_id=limit_order_id, client_order_id=limit_client_oid)
-                        elif isinstance(client, OkxClient):
-                            phases["limit_cancel"] = client.cancel_order(market_type=market_type, symbol=str(symbol), ord_id=limit_order_id, cl_ord_id=limit_client_oid)
-                        elif isinstance(client, BitgetMixClient):
-                            product_type = str(exchange_config.get("product_type") or exchange_config.get("productType") or "USDT-FUTURES")
-                            margin_coin = str(exchange_config.get("margin_coin") or exchange_config.get("marginCoin") or "USDT")
-                            phases["limit_cancel"] = client.cancel_order(symbol=str(symbol), product_type=product_type, margin_coin=margin_coin, order_id=limit_order_id, client_oid=limit_client_oid)
-                        elif isinstance(client, BitgetSpotClient):
-                            phases["limit_cancel"] = client.cancel_order(symbol=str(symbol), client_order_id=limit_client_oid)
-                        elif isinstance(client, BybitClient):
-                            phases["limit_cancel"] = client.cancel_order(symbol=str(symbol), order_id=limit_order_id, client_order_id=limit_client_oid)
-                        elif isinstance(client, CoinbaseExchangeClient):
-                            phases["limit_cancel"] = client.cancel_order(order_id=limit_order_id, client_order_id=limit_client_oid)
-                        elif isinstance(client, KrakenClient):
-                            phases["limit_cancel"] = client.cancel_order(order_id=limit_order_id)
-                        elif isinstance(client, KrakenFuturesClient):
-                            phases["limit_cancel"] = client.cancel_order(order_id=limit_order_id, client_order_id=limit_client_oid)
-                        elif isinstance(client, KucoinSpotClient):
-                            phases["limit_cancel"] = client.cancel_order(order_id=limit_order_id, client_order_id=limit_client_oid)
-                        elif isinstance(client, KucoinFuturesClient):
-                            phases["limit_cancel"] = client.cancel_order(order_id=limit_order_id, client_order_id=limit_client_oid)
-                        elif isinstance(client, GateSpotClient):
-                            phases["limit_cancel"] = client.cancel_order(order_id=limit_order_id)
-                        elif isinstance(client, GateUsdtFuturesClient):
-                            phases["limit_cancel"] = client.cancel_order(order_id=limit_order_id)
-                        elif isinstance(client, DeepcoinClient):
-                            phases["limit_cancel"] = client.cancel_order(symbol=str(symbol), order_id=limit_order_id, client_order_id=limit_client_oid)
-                        elif isinstance(client, HtxClient):
-                            phases["limit_cancel"] = client.cancel_order(symbol=str(symbol), order_id=limit_order_id, client_order_id=limit_client_oid)
+                        phases["limit_cancel"] = cancel_live_limit_order(
+                            client=client,
+                            symbol=str(symbol),
+                            order_id=limit_order_id,
+                            client_order_id=limit_client_oid,
+                            market_type=market_type,
+                            exchange_config=exchange_config,
+                        )
                     except Exception:
                         pass
             except LiveTradingError as e:
                 logger.warning(f"live limit phase failed: pending_id={order_id}, strategy_id={strategy_id}, cfg={safe_cfg}, err={e}")
-                # Fall back to market for full amount
                 remaining = float(amount or 0.0)
-                phases["limit_error"] = str(e)
-                append_strategy_log(strategy_id, "error", f"Exchange limit order failed ({exchange_id} {symbol}): {e}, falling back to market")
+                friendly_error = self._friendly_order_error(
+                    e,
+                    client=client,
+                    exchange_id=exchange_id,
+                    symbol=symbol,
+                    signal_type=signal_type,
+                    amount=amount,
+                    price=ref_price,
+                    payload=payload,
+                )
+                phases["limit_error"] = friendly_error
+                append_strategy_log(strategy_id, "error", f"Exchange limit order failed ({exchange_id} {symbol}): {friendly_error}, falling back to market")
             except Exception as e:
                 logger.warning(f"live limit phase unexpected error: pending_id={order_id}, strategy_id={strategy_id}, cfg={safe_cfg}, err={e}")
                 remaining = float(amount or 0.0)
@@ -2059,298 +2027,69 @@ class PendingOrderWorker:
 
         # Phase 2: market for remaining
         market_order_id = ""
-        market_client_oid = _make_client_oid("mkt")
+        market_client_oid = make_client_order_id(
+            exchange_id=exchange_id,
+            strategy_id=strategy_id,
+            order_id=order_id,
+            phase="mkt",
+        )
         if remaining > 0:
             try:
-                if isinstance(client, BinanceFuturesClient):
-                    res2 = client.place_market_order(
-                        symbol=str(symbol),
-                        side="BUY" if side == "buy" else "SELL",
-                        quantity=remaining,
-                        reduce_only=reduce_only,
-                        position_side=pos_side,
-                        client_order_id=market_client_oid,
-                    )
-                elif isinstance(client, BinanceSpotClient):
-                    res2 = client.place_market_order(
-                        symbol=str(symbol),
-                        side="BUY" if side == "buy" else "SELL",
-                        quantity=remaining,
-                        client_order_id=market_client_oid,
-                    )
-                elif isinstance(client, OkxClient):
-                    td_mode = str(payload.get("margin_mode") or payload.get("td_mode") or "cross")
-                    if market_type == "swap":
-                        try:
-                            inst_id = to_okx_swap_inst_id(str(symbol))
-                            client.set_leverage(inst_id=inst_id, lever=leverage, mgn_mode=td_mode, pos_side=pos_side)
-                        except Exception:
-                            pass
-                    res2 = client.place_market_order(
-                        symbol=str(symbol),
-                        side=side,
-                        size=remaining,
-                        market_type=market_type,
-                        pos_side=pos_side,
-                        td_mode=td_mode,
-                        reduce_only=reduce_only,
-                        client_order_id=market_client_oid,
-                    )
-                elif isinstance(client, BitgetMixClient):
-                    product_type = str(exchange_config.get("product_type") or exchange_config.get("productType") or "USDT-FUTURES")
-                    margin_coin = str(exchange_config.get("margin_coin") or exchange_config.get("marginCoin") or "USDT")
-                    margin_mode = str(payload.get("margin_mode") or payload.get("marginMode") or exchange_config.get("margin_mode") or exchange_config.get("marginMode") or "cross")
-                    try:
-                        if market_type == "swap":
-                            client.set_leverage(
-                                symbol=str(symbol),
-                                leverage=leverage,
-                                margin_coin=margin_coin,
-                                product_type=product_type,
-                                margin_mode=margin_mode,
-                                hold_side=pos_side,
-                            )
-                    except Exception:
-                        pass
-                    res2 = client.place_market_order(
-                        symbol=str(symbol),
-                        side=side,
-                        size=remaining,
-                        margin_coin=margin_coin,
-                        product_type=product_type,
-                        margin_mode=margin_mode,
-                        reduce_only=reduce_only,
-                        client_order_id=market_client_oid,
-                        hold_side=pos_side or ("long" if side == "buy" else "short"),
-                    )
-                elif isinstance(client, BitgetSpotClient):
-                    mkt_size = (
-                        spot_quote_amt
-                        if (side == "buy" and spot_market_buy_uses_quote and spot_quote_amt > 0)
-                        else remaining
-                    )
-                    if side == "buy" and mkt_size <= 0 and ref_price > 0:
-                        mkt_size = remaining * ref_price
-                    res2 = client.place_market_order(
-                        symbol=str(symbol),
-                        side=side,
-                        size=mkt_size,
-                        client_order_id=market_client_oid,
-                    )
-                elif isinstance(client, BybitClient):
-                    res2 = client.place_market_order(
-                        symbol=str(symbol),
-                        side=side,
-                        qty=remaining,
-                        reduce_only=reduce_only,
-                        pos_side=pos_side,
-                        client_order_id=market_client_oid,
-                    )
-                elif isinstance(client, CoinbaseExchangeClient):
-                    res2 = client.place_market_order(
-                        symbol=str(symbol),
-                        side=side,
-                        size=remaining,
-                        client_order_id=market_client_oid,
-                    )
-                elif isinstance(client, KrakenClient):
-                    res2 = client.place_market_order(
-                        symbol=str(symbol),
-                        side=side,
-                        size=remaining,
-                        client_order_id=market_client_oid,
-                    )
-                elif isinstance(client, KrakenFuturesClient):
-                    res2 = client.place_market_order(
-                        symbol=str(symbol),
-                        side=side,
-                        size=remaining,
-                        reduce_only=reduce_only,
-                        client_order_id=market_client_oid,
-                    )
-                elif isinstance(client, KucoinSpotClient):
-                    if side == "buy" and spot_market_buy_uses_quote and spot_quote_amt > 0:
-                        kucoin_mkt = spot_quote_amt
-                        kucoin_quote = True
-                    elif side == "buy" and ref_price > 0:
-                        kucoin_mkt = float(remaining) * float(ref_price)
-                        kucoin_quote = True
-                    else:
-                        kucoin_mkt = remaining
-                        kucoin_quote = False
-                    res2 = client.place_market_order(
-                        symbol=str(symbol),
-                        side=side,
-                        size=kucoin_mkt,
-                        quote_size=kucoin_quote,
-                        client_order_id=market_client_oid,
-                    )
-                elif isinstance(client, KucoinFuturesClient):
-                    try:
-                        if market_type == "swap":
-                            client.set_leverage(symbol=str(symbol), leverage=leverage)
-                    except Exception:
-                        pass
-                    res2 = client.place_market_order(
-                        symbol=str(symbol),
-                        side=side,
-                        size=remaining,
-                        reduce_only=reduce_only,
-                        client_order_id=market_client_oid,
-                    )
-                elif isinstance(client, GateSpotClient):
-                    mkt_size = (
-                        spot_quote_amt
-                        if (side == "buy" and spot_market_buy_uses_quote and spot_quote_amt > 0)
-                        else remaining
-                    )
-                    if side == "buy" and mkt_size <= 0 and ref_price > 0:
-                        mkt_size = remaining * ref_price
-                    res2 = client.place_market_order(
-                        symbol=str(symbol),
-                        side=side,
-                        size=mkt_size,
-                        client_order_id=market_client_oid,
-                    )
-                elif isinstance(client, GateUsdtFuturesClient):
-                    try:
-                        client.set_leverage(contract=to_gate_currency_pair(str(symbol)), leverage=leverage)
-                    except Exception:
-                        pass
-                    res2 = client.place_market_order(
-                        symbol=str(symbol),
-                        side=side,
-                        size=remaining,
-                        reduce_only=reduce_only,
-                        client_order_id=market_client_oid,
-                    )
-                elif isinstance(client, DeepcoinClient):
-                    if market_type == "swap":
-                        try:
-                            client.set_leverage(symbol=str(symbol), leverage=leverage)
-                        except Exception:
-                            pass
-                    res2 = client.place_market_order(
-                        symbol=str(symbol),
-                        side=side,
-                        qty=remaining,
-                        reduce_only=reduce_only,
-                        pos_side=pos_side,
-                        client_order_id=market_client_oid,
-                    )
-                elif isinstance(client, HtxClient):
-                    if market_type == "swap":
-                        try:
-                            client.set_leverage(symbol=str(symbol), leverage=leverage)
-                        except Exception:
-                            pass
-                    res2 = client.place_market_order(
-                        symbol=str(symbol),
-                        side=side,
-                        qty=remaining,
-                        reduce_only=reduce_only,
-                        pos_side=pos_side,
-                        client_order_id=market_client_oid,
-                    )
-                else:
-                    raise LiveTradingError(f"Unsupported client type: {type(client)}")
-
+                res2 = place_live_market_order(
+                    client=client,
+                    symbol=str(symbol),
+                    side=side,
+                    amount=float(remaining or 0.0),
+                    reduce_only=reduce_only,
+                    pos_side=pos_side,
+                    client_order_id=market_client_oid,
+                    market_type=market_type,
+                    payload=payload,
+                    exchange_config=exchange_config,
+                    leverage=leverage,
+                    ref_price=ref_price,
+                    spot_quote_amt=spot_quote_amt,
+                    spot_market_buy_uses_quote=spot_market_buy_uses_quote,
+                )
                 market_order_id = str(res2.exchange_order_id or "")
                 phases["market_place"] = res2.raw
 
-                # Query fills (short wait)
-                if isinstance(client, BinanceFuturesClient):
-                    q2 = client.wait_for_fill(symbol=str(symbol), order_id=market_order_id, client_order_id=market_client_oid, max_wait_sec=5.0)
-                    phases["market_query"] = q2
-                    _apply_fill(float(q2.get("filled") or 0.0), float(q2.get("avg_price") or 0.0))
-                    _apply_fee(float(q2.get("fee") or 0.0), str(q2.get("fee_ccy") or ""))
-                elif isinstance(client, BinanceSpotClient):
-                    q2 = client.wait_for_fill(symbol=str(symbol), order_id=market_order_id, client_order_id=market_client_oid, max_wait_sec=5.0)
-                    phases["market_query"] = q2
-                    _apply_fill(float(q2.get("filled") or 0.0), float(q2.get("avg_price") or 0.0))
-                    _apply_fee(float(q2.get("fee") or 0.0), str(q2.get("fee_ccy") or ""))
-                elif isinstance(client, OkxClient):
-                    # OKX fills endpoint may lag shortly after execution; wait a bit longer to capture fee.
-                    q2 = client.wait_for_fill(symbol=str(symbol), ord_id=market_order_id, cl_ord_id=market_client_oid, market_type=market_type, max_wait_sec=12.0)
-                    phases["market_query"] = q2
-                    _apply_fill(float(q2.get("filled") or 0.0), float(q2.get("avg_price") or 0.0))
-                    _apply_fee(float(q2.get("fee") or 0.0), str(q2.get("fee_ccy") or ""))
-                elif isinstance(client, BitgetMixClient):
-                    product_type = str(exchange_config.get("product_type") or exchange_config.get("productType") or "USDT-FUTURES")
-                    q2 = client.wait_for_fill(symbol=str(symbol), product_type=product_type, order_id=market_order_id, client_oid=market_client_oid, max_wait_sec=12.0)
-                    phases["market_query"] = q2
-                    _apply_fill(float(q2.get("filled") or 0.0), float(q2.get("avg_price") or 0.0))
-                    _apply_fee(float(q2.get("fee") or 0.0), str(q2.get("fee_ccy") or ""))
-                elif isinstance(client, BitgetSpotClient):
-                    q2 = client.wait_for_fill(symbol=str(symbol), order_id=market_order_id, client_order_id=market_client_oid, max_wait_sec=12.0)
-                    phases["market_query"] = q2
-                    _apply_fill(float(q2.get("filled") or 0.0), float(q2.get("avg_price") or 0.0))
-                    _apply_fee(float(q2.get("fee") or 0.0), str(q2.get("fee_ccy") or ""))
-                elif isinstance(client, BybitClient):
-                    q2 = client.wait_for_fill(symbol=str(symbol), order_id=market_order_id, client_order_id=market_client_oid, max_wait_sec=12.0)
-                    phases["market_query"] = q2
-                    _apply_fill(float(q2.get("filled") or 0.0), float(q2.get("avg_price") or 0.0))
-                    _apply_fee(float(q2.get("fee") or 0.0), str(q2.get("fee_ccy") or ""))
-                elif isinstance(client, CoinbaseExchangeClient):
-                    q2 = client.wait_for_fill(order_id=market_order_id, client_order_id=market_client_oid, max_wait_sec=12.0)
-                    phases["market_query"] = q2
-                    _apply_fill(float(q2.get("filled") or 0.0), float(q2.get("avg_price") or 0.0))
-                    _apply_fee(float(q2.get("fee") or 0.0), str(q2.get("fee_ccy") or ""))
-                elif isinstance(client, KrakenClient):
-                    q2 = client.wait_for_fill(order_id=market_order_id, max_wait_sec=12.0)
-                    phases["market_query"] = q2
-                    _apply_fill(float(q2.get("filled") or 0.0), float(q2.get("avg_price") or 0.0))
-                    _apply_fee(float(q2.get("fee") or 0.0), str(q2.get("fee_ccy") or ""))
-                elif isinstance(client, KrakenFuturesClient):
-                    q2 = client.wait_for_fill(order_id=market_order_id, client_order_id=market_client_oid, max_wait_sec=12.0)
-                    phases["market_query"] = q2
-                    _apply_fill(float(q2.get("filled") or 0.0), float(q2.get("avg_price") or 0.0))
-                    _apply_fee(float(q2.get("fee") or 0.0), str(q2.get("fee_ccy") or ""))
-                elif isinstance(client, KucoinSpotClient):
-                    q2 = client.wait_for_fill(order_id=market_order_id, max_wait_sec=12.0)
-                    phases["market_query"] = q2
-                    _apply_fill(float(q2.get("filled") or 0.0), float(q2.get("avg_price") or 0.0))
-                    _apply_fee(float(q2.get("fee") or 0.0), str(q2.get("fee_ccy") or ""))
-                elif isinstance(client, KucoinFuturesClient):
-                    q2 = client.wait_for_fill(order_id=market_order_id, max_wait_sec=12.0)
-                    phases["market_query"] = q2
-                    _apply_fill(float(q2.get("filled") or 0.0), float(q2.get("avg_price") or 0.0))
-                    _apply_fee(float(q2.get("fee") or 0.0), str(q2.get("fee_ccy") or ""))
-                elif isinstance(client, GateSpotClient):
-                    q2 = client.wait_for_fill(order_id=market_order_id, max_wait_sec=12.0)
-                    phases["market_query"] = q2
-                    _apply_fill(float(q2.get("filled") or 0.0), float(q2.get("avg_price") or 0.0))
-                    _apply_fee(float(q2.get("fee") or 0.0), str(q2.get("fee_ccy") or ""))
-                elif isinstance(client, GateUsdtFuturesClient):
-                    q2 = client.wait_for_fill(order_id=market_order_id, contract=to_gate_currency_pair(str(symbol)), max_wait_sec=12.0)
-                    phases["market_query"] = q2
-                    _apply_fill(float(q2.get("filled") or 0.0), float(q2.get("avg_price") or 0.0))
-                    _apply_fee(float(q2.get("fee") or 0.0), str(q2.get("fee_ccy") or ""))
-                elif isinstance(client, DeepcoinClient):
-                    q2 = client.wait_for_fill(symbol=str(symbol), order_id=market_order_id, client_order_id=market_client_oid, max_wait_sec=12.0)
-                    phases["market_query"] = q2
-                    _apply_fill(float(q2.get("filled") or 0.0), float(q2.get("avg_price") or 0.0))
-                    _apply_fee(float(q2.get("fee") or 0.0), str(q2.get("fee_ccy") or ""))
-                elif isinstance(client, HtxClient):
-                    q2 = client.wait_for_fill(symbol=str(symbol), order_id=market_order_id, client_order_id=market_client_oid, max_wait_sec=12.0)
-                    phases["market_query"] = q2
-                    _apply_fill(float(q2.get("filled") or 0.0), float(q2.get("avg_price") or 0.0))
-                    _apply_fee(float(q2.get("fee") or 0.0), str(q2.get("fee_ccy") or ""))
+                q2 = wait_live_order_fill(
+                    client=client,
+                    symbol=str(symbol),
+                    order_id=market_order_id,
+                    client_order_id=market_client_oid,
+                    market_type=market_type,
+                    exchange_config=exchange_config,
+                    max_wait_sec=12.0,
+                    phase="market",
+                )
+                phases["market_query"] = q2
+                apply_fill_snapshot(fills, q2)
             except LiveTradingError as e:
                 logger.warning(f"live market phase failed: pending_id={order_id}, strategy_id={strategy_id}, cfg={safe_cfg}, err={e}")
-                phases["market_error"] = str(e)
-                # If we already got any fills in the limit phase, treat as partial success instead of failing the whole order.
-                if float(total_base or 0.0) > 0:
+                friendly_error = self._friendly_order_error(
+                    e,
+                    client=client,
+                    exchange_id=exchange_id,
+                    symbol=symbol,
+                    signal_type=signal_type,
+                    amount=amount,
+                    price=ref_price,
+                    payload=payload,
+                )
+                phases["market_error"] = friendly_error
+                if float(fills.total_base or 0.0) > 0:
                     _console_print(
-                        f"[worker] market tail failed but partial filled: strategy_id={strategy_id} pending_id={order_id} filled={total_base} err={e}"
+                        f"[worker] market tail failed but partial filled: strategy_id={strategy_id} pending_id={order_id} filled={fills.total_base} err={e}"
                     )
                     remaining = 0.0
-                    append_strategy_log(strategy_id, "error", f"Exchange market order partially failed ({symbol} {signal_type}): {e} (partial filled={total_base})")
+                    append_strategy_log(strategy_id, "error", f"Exchange market order partially failed ({symbol} {signal_type}): {friendly_error} (partial filled={fills.total_base})")
                 else:
-                    self._mark_failed(order_id=order_id, error=str(e))
-                    _console_print(f"[worker] order failed: strategy_id={strategy_id} pending_id={order_id} err={e}")
-                    _notify_live_best_effort(status="failed", error=str(e), amount_hint=amount, price_hint=ref_price)
-                    append_strategy_log(strategy_id, "error", f"Exchange order failed ({exchange_id} {symbol} {signal_type}): {e}")
+                    self._mark_failed(order_id=order_id, error=friendly_error)
+                    _console_print(f"[worker] order failed: strategy_id={strategy_id} pending_id={order_id} err={friendly_error}")
+                    _notify_live_best_effort(status="failed", error=friendly_error, amount_hint=amount, price_hint=ref_price)
+                    append_strategy_log(strategy_id, "error", f"Exchange order failed ({exchange_id} {symbol} {signal_type}): {friendly_error}")
                     return
             except Exception as e:
                 logger.warning(f"live market phase unexpected error: pending_id={order_id}, strategy_id={strategy_id}, cfg={safe_cfg}, err={e}")
@@ -2360,9 +2099,9 @@ class PendingOrderWorker:
                 append_strategy_log(strategy_id, "error", f"Unexpected order error ({exchange_id} {symbol} {signal_type}): {e}")
                 return
 
-        # Build final result (best-effort) — live path never fabricates fill qty from request amount.
-        filled_final = float(total_base or 0.0)
-        avg_final = float(_current_avg() or 0.0)
+        # Build final result (best-effort); live path never fabricates fill qty from request amount.
+        filled_final = float(fills.total_base or 0.0)
+        avg_final = float(fills.avg_price() or 0.0)
 
         ex_oid_for_recovery = str(market_order_id or limit_order_id or "")
         coid_for_recovery = str(
@@ -2427,7 +2166,7 @@ class PendingOrderWorker:
             if filled > 0 and avg_price > 0:
                 logger.info(
                     f"live record begin: pending_id={order_id} strategy_id={strategy_id} symbol={symbol} "
-                    f"signal={signal_type} filled={filled} avg_price={avg_price} fee={total_fee} fee_ccy={fee_ccy}"
+                    f"signal={signal_type} filled={filled} avg_price={avg_price} fee={fills.total_fee} fee_ccy={fills.fee_ccy}"
                 )
                 _close_reason = _trade_close_reason_from_payload(payload, str(signal_type))
                 profit, matched_entry = _persist_strategy_fill(
@@ -2440,13 +2179,13 @@ class PendingOrderWorker:
                     market_type=str(market_type or "swap"),
                     order_id=int(order_id),
                     fill_source="worker",
-                    commission=float(total_fee or 0.0),
-                    commission_ccy=str(fee_ccy or "").strip().upper(),
+                    commission=float(fills.total_fee or 0.0),
+                    commission_ccy=str(fills.fee_ccy or "").strip().upper(),
                     close_reason=_close_reason,
                 )
                 logger.info(f"live record done: pending_id={order_id} strategy_id={strategy_id} symbol={symbol} signal={signal_type}")
                 _profit_str = f", profit={profit:.4f}" if profit is not None else ""
-                _fee_str = f", fee={total_fee:.6f} {fee_ccy}" if total_fee > 0 else ""
+                _fee_str = f", fee={fills.total_fee:.6f} {fills.fee_ccy}" if fills.total_fee > 0 else ""
                 _reason_parts = []
                 _reason = str(payload.get("reason") or "").strip()
                 if _reason:
@@ -2638,7 +2377,7 @@ class PendingOrderWorker:
         Execute order via Alpaca for US stocks (USStock) or crypto.
 
         Mirrors `_execute_ibkr_order`: market order, brief poll for fill,
-        record trade, mark sent. Long-only — short signals are rejected.
+        record trade, mark sent. Long-only; short signals are rejected.
         """
         signal_type = payload.get("signal_type") or order_row.get("signal_type")
         symbol = payload.get("symbol") or order_row.get("symbol")
@@ -2688,17 +2427,17 @@ class PendingOrderWorker:
             exchange_order_id = str(result.order_id or "")
 
             if avg_price <= 0 and ref_price > 0:
-                logger.warning(
-                    f"[worker] Alpaca order avg_price=0, using ref_price={ref_price} as fallback: "
-                    f"strategy_id={strategy_id} pending_id={order_id}"
-                )
-                avg_price = ref_price
-            if filled <= 0:
-                logger.warning(
-                    f"[worker] Alpaca order filled=0, using amount={amount} as fallback: "
-                    f"strategy_id={strategy_id} pending_id={order_id}"
-                )
-                filled = amount
+                if filled > 0:
+                    logger.warning(
+                        f"[worker] Alpaca order avg_price=0, using ref_price={ref_price} as fallback: "
+                        f"strategy_id={strategy_id} pending_id={order_id}"
+                    )
+                    avg_price = ref_price
+                else:
+                    logger.info(
+                        f"[worker] Alpaca order submitted but not filled yet: "
+                        f"strategy_id={strategy_id} pending_id={order_id} status={result.status}"
+                    )
 
             executed_at = int(time.time())
 
@@ -2736,6 +2475,11 @@ class PendingOrderWorker:
                     append_strategy_log(
                         strategy_id, "trade",
                         f"Trade executed: {signal_type} {symbol} filled={filled:.6f} @ {avg_price:.6f}{_pstr} (exchange=alpaca)",
+                    )
+                else:
+                    append_strategy_log(
+                        strategy_id, "info",
+                        f"Alpaca order submitted: {signal_type} {symbol} status={result.status or 'submitted'}, awaiting fill",
                     )
             except Exception as e:
                 logger.warning(f"Alpaca record_trade/update_position failed: pending_id={order_id}, err={e}")
@@ -2977,5 +2721,3 @@ class PendingOrderWorker:
             )
             db.commit()
             cur.close()
-
-

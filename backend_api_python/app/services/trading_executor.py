@@ -8,6 +8,8 @@ import time
 import threading
 import traceback
 import os
+import math
+import re
 try:
     import resource  # Linux/Unix only
 except Exception:
@@ -139,6 +141,59 @@ class TradingExecutor:
         
         # 确保数据库字段存在
         self._ensure_db_columns()
+
+    def _estimate_indicator_warmup_bars(
+        self,
+        indicator_code: str,
+        indicator_params: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        """Estimate warmup candles needed before an indicator becomes reliable."""
+        try:
+            declared = IndicatorParamsParser.parse_params(indicator_code or "")
+            merged = IndicatorParamsParser.merge_params(declared, indicator_params or {})
+        except Exception:
+            merged = {}
+
+        max_period = 0
+        period_name_re = re.compile(
+            r"(len|length|period|window|lookback|ema|sma|rsi|adx|atr|vol|ma)$",
+            re.IGNORECASE,
+        )
+        for key, value in (merged or {}).items():
+            name = str(key or "")
+            try:
+                n = int(float(value))
+            except Exception:
+                continue
+            if n <= 1 or n > 10000:
+                continue
+            if period_name_re.search(name) or name.endswith("_n"):
+                max_period = max(max_period, n)
+
+        if max_period <= 0:
+            return 0
+        return int(min(max_period + max(50, math.ceil(max_period * 0.5)), 2000))
+
+    def _warn_if_indicator_history_short(
+        self,
+        strategy_id: int,
+        indicator_code: str,
+        trading_config: Dict[str, Any],
+        current_bars: int,
+        history_limit: int,
+        timeframe: str,
+    ) -> None:
+        indicator_params = (trading_config or {}).get("indicator_params") or {}
+        warmup_bars = self._estimate_indicator_warmup_bars(indicator_code, indicator_params)
+        if warmup_bars <= 0 or current_bars >= warmup_bars:
+            return
+        message = (
+            f"Indicator warmup may be insufficient: current history={int(current_bars)} bars, "
+            f"configured limit={int(history_limit)} bars, estimated warmup={int(warmup_bars)} bars ({timeframe}). "
+            f"Increase K_LINE_HISTORY_GET_NUMBER above {int(warmup_bars)} or reduce long-period params."
+        )
+        logger.warning("Strategy %s %s", strategy_id, message)
+        append_strategy_log(strategy_id, "error", message)
 
     def _ensure_db_columns(self):
         """确保必要的数据库字段存在（PostgreSQL）"""
@@ -533,7 +588,8 @@ class TradingExecutor:
 
         tc = trading_config or {}
         return {
-            "entry_ratio": self._to_ratio(tc.get("entry_pct"), default=1.0),
+            # Flat trading_config stores percent numbers: 100 means 100%.
+            "entry_ratio": self._to_ratio(tc.get("entry_pct"), default=100.0),
             "stop_loss_ratio": self._to_ratio(tc.get("stop_loss_pct")),
             "take_profit_ratio": self._to_ratio(tc.get("take_profit_pct")),
             "trailing_enabled": bool(tc.get("trailing_enabled")),
@@ -574,7 +630,7 @@ class TradingExecutor:
             trailing_enabled = bool(tc.get("trailing_enabled"))
             trailing_stop_pct = self._to_ratio(tc.get("trailing_stop_pct"))
             trailing_activation_pct = self._to_ratio(tc.get("trailing_activation_pct"))
-            entry_pct = self._to_ratio(tc.get("entry_pct"))
+            entry_pct = self._to_ratio(tc.get("entry_pct"), default=100.0)
 
         # Scale-in
         trend_add_enabled = bool(tc.get("trend_add_enabled"))
@@ -1274,13 +1330,27 @@ class TradingExecutor:
             leverage = 1.0
         market_type = str((trading_config or {}).get('market_type') or 'swap').lower()
 
-        def _to_local_qty(usdt_or_ratio: float, ref_price: float) -> float:
-            if ref_price is None or ref_price <= 0 or usdt_or_ratio is None or usdt_or_ratio <= 0:
+        def _to_local_qty(value: float, ref_price: float, *, from_order_amount: bool) -> float:
+            if ref_price is None or ref_price <= 0 or value is None or value <= 0:
                 return 0.0
-            if is_bot_script and float(usdt_or_ratio) > 1.0:
+            if is_bot_script and from_order_amount:
                 lev = leverage if market_type != 'spot' else 1.0
-                return float(usdt_or_ratio) * lev / float(ref_price)
-            return float(usdt_or_ratio)
+                return float(value) * lev / float(ref_price)
+            if is_bot_script and float(value) > 1.0:
+                lev = leverage if market_type != 'spot' else 1.0
+                return float(value) * lev / float(ref_price)
+            return float(value)
+
+        def _script_quote_extra() -> Dict[str, Any]:
+            """Bot scripts pass quote notional via ctx.buy/sell(amount=...)."""
+            if (not is_bot_script) or raw_amt is None:
+                return {}
+            try:
+                if float(raw_amt) > 0:
+                    return {'script_quote_amount': float(raw_amt)}
+            except Exception:
+                pass
+            return {}
 
         def _script_qty_extra() -> Dict[str, Any]:
             """Non-bot scripts pass base-asset qty via ctx.buy/sell; honor it live like backtest."""
@@ -1296,6 +1366,7 @@ class TradingExecutor:
         def _emit(sig: Dict[str, Any], reason_override: Optional[str]) -> None:
             if reason_override:
                 sig.setdefault('reason', reason_override)
+            sig.update(_script_quote_extra())
             sig.update(_script_qty_extra())
             out.append(sig)
 
@@ -1317,7 +1388,7 @@ class TradingExecutor:
                 except Exception:
                     pass
             ref_px = order_price if order_price > 0 else trig
-            local_qty = _to_local_qty(pos_ratio, ref_px)
+            local_qty = _to_local_qty(pos_ratio, ref_px, from_order_amount=(raw_amt is not None))
 
             if action == 'close':
                 # Legacy ctx.close_position() — closes whichever leg is dominant.
@@ -1367,22 +1438,22 @@ class TradingExecutor:
                     'timestamp': ts_i, 'matched_entry_price': avg_entry,
                 }, reason_hint or ('grid_reduce_short' if is_grid_bot else None))
                 continue
-
-            if intent == 'open_long':
-                if td not in ('long', 'both'):
+            if intent in ('open_long', 'add_long'):
+                has_long = ctx.position.has_long()
+                if td not in ('long', 'both') or (intent == 'add_long' and not has_long) or (intent == 'open_long' and has_long and not is_bot_script):
                     continue
-                sig_type = 'add_long' if ctx.position.has_long() else 'open_long'
+                sig_type = 'add_long' if has_long else 'open_long'
                 ctx.position.open_long(ref_px, local_qty)
                 _emit({
                     'type': sig_type, 'trigger_price': ref_px, 'position_size': pos_ratio,
                     'timestamp': ts_i,
                 }, reason_hint)
                 continue
-
-            if intent == 'open_short':
-                if td not in ('short', 'both'):
+            if intent in ('open_short', 'add_short'):
+                has_short = ctx.position.has_short()
+                if td not in ('short', 'both') or (intent == 'add_short' and not has_short) or (intent == 'open_short' and has_short and not is_bot_script):
                     continue
-                sig_type = 'add_short' if ctx.position.has_short() else 'open_short'
+                sig_type = 'add_short' if has_short else 'open_short'
                 ctx.position.open_short(ref_px, local_qty)
                 _emit({
                     'type': sig_type, 'trigger_price': ref_px, 'position_size': pos_ratio,
@@ -1390,11 +1461,7 @@ class TradingExecutor:
                 }, reason_hint)
                 continue
 
-            # ---- Legacy ctx.buy / ctx.sell (intent == 'auto') ----------------
-            # For grid bots: a buy first covers the short leg if any, then
-            # opens/adds the long leg. The order's `amount` is interpreted as
             # ONE atomic step — if the short leg can absorb it we don't also
-            # add a long, mirroring the old behaviour but using hedge state.
             if action == 'buy':
                 if is_grid_bot:
                     if ctx.position.has_short():
@@ -1420,12 +1487,12 @@ class TradingExecutor:
                             'matched_entry_price': avg_entry,
                         }, reason_hint)
                     if td in ('long', 'both'):
-                        sig_type = 'add_long' if ctx.position.has_long() else 'open_long'
-                        ctx.position.open_long(ref_px, local_qty)
-                        _emit({
-                            'type': sig_type, 'trigger_price': ref_px,
-                            'position_size': pos_ratio, 'timestamp': ts_i,
-                        }, reason_hint)
+                        if not ctx.position.has_long():
+                            ctx.position.open_long(ref_px, local_qty)
+                            _emit({
+                                'type': 'open_long', 'trigger_price': ref_px,
+                                'position_size': pos_ratio, 'timestamp': ts_i,
+                            }, reason_hint)
                 continue
 
             if action == 'sell':
@@ -1453,12 +1520,12 @@ class TradingExecutor:
                             'matched_entry_price': avg_entry,
                         }, reason_hint)
                     if td in ('short', 'both'):
-                        sig_type = 'add_short' if ctx.position.has_short() else 'open_short'
-                        ctx.position.open_short(ref_px, local_qty)
-                        _emit({
-                            'type': sig_type, 'trigger_price': ref_px,
-                            'position_size': pos_ratio, 'timestamp': ts_i,
-                        }, reason_hint)
+                        if not ctx.position.has_short():
+                            ctx.position.open_short(ref_px, local_qty)
+                            _emit({
+                                'type': 'open_short', 'trigger_price': ref_px,
+                                'position_size': pos_ratio, 'timestamp': ts_i,
+                            }, reason_hint)
         return out
 
     def _script_evaluate_new_closed_bar(
@@ -1693,6 +1760,12 @@ class TradingExecutor:
             exit_reason = reason
             logger.error(f"Strategy {strategy_id} abort: {reason}")
             _set_db_stopped_best_effort(reason)
+
+        def _unexpected_exit_reason() -> str:
+            return (
+                "thread exited unexpectedly without a recorded reason; "
+                "check process restart, resource limits, or an unhandled loop exit"
+            )
 
         def _is_fatal_error(err: Exception, msg: str) -> bool:
             # Config errors from data sources should stop immediately.
@@ -1957,7 +2030,7 @@ class TradingExecutor:
                 exchange_id=kline_exchange_id, market_type=kline_market_type,
             )
             if not klines or len(klines) < 2:
-                _abort_loop("failed to fetch K-lines (need at least 2 bars)")
+                _abort_loop(f"failed to fetch K-lines for {market_category}:{symbol} {timeframe} via {kline_exchange_id or 'default'}/{kline_market_type or 'default'} (need at least 2 bars)")
                 return
             logger.info(rf'Strategy {strategy_id} history kline number: {len(klines)}')
             
@@ -1966,6 +2039,15 @@ class TradingExecutor:
             if len(df) == 0:
                 _abort_loop("K-lines are empty after normalization")
                 return
+            if not is_script:
+                self._warn_if_indicator_history_short(
+                    strategy_id=strategy_id,
+                    indicator_code=indicator_code,
+                    trading_config=trading_config,
+                    current_bars=len(df),
+                    history_limit=history_limit,
+                    timeframe=timeframe,
+                )
 
             # ============================================
             # 启动时：同步持仓状态，清理"幽灵持仓"
@@ -2101,7 +2183,7 @@ class TradingExecutor:
                         _abort_loop(f"grid resting startup failed: {err_gr}")
                         return
                     if grid_resting_runner.should_stop:
-                        _abort_loop("Grid auto-stopped during startup: exchange error")
+                        _abort_loop(f"Grid auto-stopped during startup: {grid_resting_runner.stop_reason or 'grid resting engine requested stop'}")
                         return
                     pending_signals = []
                     append_strategy_log(
@@ -2177,6 +2259,7 @@ class TradingExecutor:
                 try:
                     # 检查策略状态
                     if not self._is_strategy_running(strategy_id):
+                        exit_reason = exit_reason or "run flag cleared / status stopped"
                         logger.info(f"Strategy {strategy_id} stopped")
                         break
                     
@@ -2249,7 +2332,7 @@ class TradingExecutor:
                                                 )
                                             pending_signals = []
                                             if grid_resting_runner.should_stop:
-                                                exit_reason = "Grid auto-stopped: exchange error"
+                                                exit_reason = f"Grid auto-stopped: {grid_resting_runner.stop_reason or 'engine requested stop'}"
                                                 logger.error(f"Strategy {strategy_id} {exit_reason}")
                                                 _set_db_stopped_best_effort(exit_reason)
                                                 break
@@ -2360,7 +2443,7 @@ class TradingExecutor:
                             except Exception as e:
                                 logger.warning(f"Strategy {strategy_id} grid resting tick error: {e}")
                             if grid_resting_runner.should_stop:
-                                exit_reason = "Grid auto-stopped: exchange error"
+                                exit_reason = f"Grid auto-stopped: {grid_resting_runner.stop_reason or 'engine requested stop'}"
                                 logger.error(f"Strategy {strategy_id} {exit_reason}")
                                 _set_db_stopped_best_effort(exit_reason)
                                 break
@@ -2751,6 +2834,7 @@ class TradingExecutor:
                                 signal_reason=selected.get("reason"),
                                 trailing_stop_price=selected.get("trailing_stop_price"),
                                 script_base_qty=selected.get("script_base_qty"),
+                                script_quote_amount=selected.get("script_quote_amount"),
                             )
                             if ok:
                                 logger.info(f"Strategy {strategy_id} signal executed: {signal_type} @ {execute_price}")
@@ -2851,7 +2935,7 @@ class TradingExecutor:
                 pass
             # 清理
             try:
-                self._last_exit_reason[int(strategy_id)] = (exit_reason or "strategy thread exited").strip()
+                self._last_exit_reason[int(strategy_id)] = (exit_reason or _unexpected_exit_reason()).strip()
             except Exception:
                 pass
             with self.lock:
@@ -2865,7 +2949,7 @@ class TradingExecutor:
                     row = cur.fetchone() or {}
                     cur.close()
                 if (row.get("status") or "").strip().lower() == "running":
-                    _set_db_stopped_best_effort(exit_reason or "strategy thread exited")
+                    _set_db_stopped_best_effort(exit_reason or _unexpected_exit_reason())
             except Exception:
                 pass
             self._console_print(f"[strategy:{strategy_id}] loop exited")
@@ -3805,7 +3889,7 @@ class TradingExecutor:
                     # 开多信号（仅在 entry_check_set 中检查）
                     if idx in entry_check_set and executed_df['open_long'].iloc[idx]:
                         trigger_price = close_price
-                        position_size = 0.08
+                        position_size = 0.0
                         if 'position_size' in executed_df.columns:
                             pos_size = executed_df['position_size'].iloc[idx]
                             if pos_size > 0:
@@ -3833,7 +3917,7 @@ class TradingExecutor:
                     # 开空信号
                     if idx in entry_check_set and executed_df['open_short'].iloc[idx]:
                         trigger_price = close_price
-                        position_size = 0.08
+                        position_size = 0.0
                         if 'position_size' in executed_df.columns:
                             pos_size = executed_df['position_size'].iloc[idx]
                             if pos_size > 0:
@@ -4138,6 +4222,7 @@ class TradingExecutor:
         signal_ts: int = 0,
         price_exchange_id: Optional[str] = None,
         script_base_qty: Optional[float] = None,
+        script_quote_amount: Optional[float] = None,
     ):
         """执行具体的交易信号"""
         try:
@@ -4307,10 +4392,20 @@ class TradingExecutor:
                 )
             except Exception:
                 explicit_script_qty = None
+            try:
+                explicit_script_quote = (
+                    float(script_quote_amount)
+                    if script_quote_amount is not None and float(script_quote_amount) > 0
+                    else None
+                )
+            except Exception:
+                explicit_script_quote = None
+
+            sizing_meta: Dict[str, Any] = {}
 
             # Frontend position sizing alignment:
             # - non-bot open_* uses entry_pct from trading_config if provided
-            # - bot scripts pass their own amount/ratio from ctx.buy()/ctx.sell()
+            # - bot scripts pass quote notional from ctx.buy()/ctx.sell()
             # - script strategies with ctx.buy(price, qty) pass script_base_qty (base coins)
             entry_ratio_override = None
             cs_mode = (
@@ -4331,12 +4426,23 @@ class TradingExecutor:
 
             # Open / add sizing
             if ('open' in sig or 'add' in sig):
-                 if explicit_script_qty is not None and not is_bot_script:
+                 if explicit_script_quote is not None and is_bot_script:
+                     if current_price > 0:
+                         if market_type == 'spot':
+                             from app.services.live_trading.spot_sizing import scale_spot_open_notional
+                             quote_stake = scale_spot_open_notional(float(explicit_script_quote))
+                             amount = quote_stake / current_price
+                             sizing_meta = {"source": "script_quote", "entry_ratio": None, "quote_notional": quote_stake}
+                         else:
+                             amount = (float(explicit_script_quote) * leverage) / current_price
+                             sizing_meta = {"source": "script_quote", "entry_ratio": None, "quote_notional": float(explicit_script_quote) * float(leverage or 1)}
+                 elif explicit_script_qty is not None and not is_bot_script:
                      amount = explicit_script_qty
+                     sizing_meta = {"source": "script_base_qty", "entry_ratio": None, "quote_notional": float(amount or 0.0) * float(current_price or 0.0)}
                  elif position_size is None or float(position_size) <= 0:
                      position_size = 0.05
 
-                 if explicit_script_qty is None and is_bot_script and float(position_size) > 1.0:
+                 if explicit_script_quote is None and explicit_script_qty is None and is_bot_script and float(position_size) > 1.0:
                      # Bot scripts pass amount as absolute USDT notional, not ratio.
                      usdt_notional = float(position_size)
                      if market_type == 'spot':
@@ -4345,20 +4451,36 @@ class TradingExecutor:
                          amount = usdt_notional / current_price
                      else:
                          amount = (usdt_notional * leverage) / current_price
-                 elif explicit_script_qty is None:
+                     sizing_meta = {"source": "bot_quote_notional", "entry_ratio": None, "quote_notional": usdt_notional * (float(leverage or 1) if market_type != 'spot' else 1.0)}
+                 elif explicit_script_quote is None and explicit_script_qty is None:
                      use_code_ratios = bool(self._code_strategy_cfg(trading_config))
                      if use_code_ratios and sig in ("open_long", "open_short", "add_long", "add_short"):
                          position_ratio = float(position_size)
+                         sizing_source = "code_strategy_entryPct"
                      elif entry_ratio_override is not None:
                          position_ratio = float(entry_ratio_override)
+                         sizing_source = "trading_config_entry_pct"
                      else:
                          position_ratio = self._to_ratio(position_size, default=0.05)
+                         sizing_source = "signal_position_size"
                      if market_type == 'spot':
                          from app.services.live_trading.spot_sizing import scale_spot_open_notional
                          quote_stake = scale_spot_open_notional(available_capital * position_ratio)
                          amount = quote_stake / current_price
+                         quote_notional = quote_stake
                      else:
                          amount = (available_capital * position_ratio * leverage) / current_price
+                         quote_notional = available_capital * position_ratio * float(leverage or 1)
+                     sizing_meta = {
+                         "source": sizing_source,
+                         "initial_capital": float(initial_capital or 0.0),
+                         "available_capital": float(available_capital or 0.0),
+                         "entry_ratio": float(position_ratio or 0.0),
+                         "entry_pct": float(position_ratio or 0.0) * 100.0,
+                         "leverage": float(leverage or 1.0),
+                         "price": float(current_price or 0.0),
+                         "quote_notional": float(quote_notional or 0.0),
+                     }
 
             # Reduce sizing: position_size is treated as a reduce ratio (close X% of current position).
             if sig in ("reduce_long", "reduce_short"):
@@ -4419,6 +4541,41 @@ class TradingExecutor:
 
             if amount <= 0 and ('open' in signal_type or 'add' in signal_type):
                 return False
+
+            if ('open' in sig or 'add' in sig) and current_price > 0:
+                try:
+                    sizing_meta.update(
+                        {
+                            "final_qty": float(amount or 0.0),
+                            "final_notional": float(amount or 0.0) * float(current_price or 0.0),
+                            "market_type": str(market_type or ""),
+                            "signal_type": str(signal_type or ""),
+                        }
+                    )
+                    append_strategy_log(
+                        strategy_id,
+                        "info",
+                        (
+                            "Order sizing: "
+                            f"capital={float(sizing_meta.get('initial_capital') or initial_capital or 0):.4f}, "
+                            f"available={float(sizing_meta.get('available_capital') or available_capital or 0):.4f}, "
+                            f"entry_pct={float(sizing_meta.get('entry_pct') or 0):.4f}%, "
+                            f"leverage={float(leverage or 1):.4f}x, "
+                            f"price={float(current_price or 0):.8f}, "
+                            f"qty={float(amount or 0):.12f}, "
+                            f"notional={float(sizing_meta.get('final_notional') or 0):.4f}, "
+                            f"source={sizing_meta.get('source') or 'unknown'}"
+                        ),
+                    )
+                except Exception:
+                    pass
+
+            if (explicit_script_qty is not None or explicit_script_quote is not None) and ('open' in sig or 'add' in sig) and current_price > 0:
+                requested_notional = float(amount or 0.0) * float(current_price or 0.0)
+                max_notional = float(available_capital or 0.0) * (float(leverage or 1.0) if market_type != 'spot' else 1.0)
+                if max_notional > 0 and requested_notional > max_notional * 1.000001:
+                    append_strategy_log(strategy_id, "info", f"Risk: script order amount exceeds capital ({requested_notional:.2f} > {max_notional:.2f}); check quote/base sizing")
+                    return False
             
             bot_order_mode = (trading_config or {}).get('order_mode') or None
             order_result = self._execute_exchange_order(
@@ -4440,6 +4597,7 @@ class TradingExecutor:
                 trailing_stop_price=trailing_stop_price,
                 signal_ts=int(signal_ts or 0),
                 order_mode=bot_order_mode,
+                sizing_meta=sizing_meta if sizing_meta else None,
             )
             
             if order_result and order_result.get('success'):
@@ -4794,6 +4952,7 @@ class TradingExecutor:
         notification_config: Optional[Dict[str, Any]] = None,
         signal_ts: int = 0,
         price_exchange_id: Optional[str] = None,
+        sizing_meta: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
         """
         将信号转为 pending_orders 队列记录（本方法不直连交易所、不使用 ccxt）。
@@ -4831,6 +4990,8 @@ class TradingExecutor:
             }
             if order_mode:
                 extra_payload["order_mode"] = order_mode
+            if sizing_meta and isinstance(sizing_meta, dict):
+                extra_payload["sizing"] = sizing_meta
             pending_id = self._enqueue_pending_order(
                 strategy_id=strategy_id,
                 symbol=symbol,

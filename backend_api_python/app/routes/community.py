@@ -158,7 +158,12 @@ def sync_purchased_indicator(indicator_id: int):
             return jsonify({'code': 1, 'msg': message, 'data': data})
         else:
             status = 400
-            if message in ('indicator_not_found', 'indicator_unpublished', 'local_copy_not_found'):
+            if message in (
+                'indicator_not_found',
+                'indicator_unpublished',
+                'indicator_unavailable',
+                'local_copy_not_found',
+            ):
                 status = 404
             elif message == 'not_purchased':
                 status = 403

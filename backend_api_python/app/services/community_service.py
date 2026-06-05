@@ -738,7 +738,7 @@ class CommunityService:
                         i.id, i.name, i.description, i.pricing_type, i.price, COALESCE(i.vip_free, FALSE) as vip_free,
                         i.preview_image, i.purchase_count, i.avg_rating, i.rating_count,
                         i.view_count, i.publish_to_community, i.created_at, i.updated_at,
-                        i.user_id,
+                        i.user_id, i.review_status,
                         COALESCE(i.asset_type, 'indicator') as asset_type,
                         i.source_language, i.name_i18n, i.description_i18n,
                         u.id as author_id, u.username as author_username, 
@@ -754,7 +754,9 @@ class CommunityService:
                     return None
                 
                 # 检查是否已发布到社区（或者是自己的指标）
-                if not row['publish_to_community'] and row['user_id'] != user_id:
+                is_owner = row['user_id'] == user_id
+                is_approved = row.get('review_status') in (None, '', 'approved')
+                if not is_owner and (not row['publish_to_community'] or not is_approved):
                     cur.close()
                     return None
                 
@@ -905,6 +907,7 @@ class CommunityService:
                            COALESCE(asset_type, 'indicator') as asset_type
                     FROM qd_indicator_codes
                     WHERE id = ? AND publish_to_community = 1
+                      AND (review_status = 'approved' OR review_status IS NULL)
                 """, (indicator_id,))
                 indicator = cur.fetchone()
                 
@@ -1246,7 +1249,7 @@ class CommunityService:
                 cur.execute(
                     """
                     SELECT id, user_id, name, code, description, preview_image, is_encrypted,
-                           publish_to_community, updated_at,
+                           publish_to_community, review_status, updated_at,
                            COALESCE(asset_type, 'indicator') as asset_type
                     FROM qd_indicator_codes
                     WHERE id = ?
@@ -1260,6 +1263,9 @@ class CommunityService:
                 if not original.get('publish_to_community'):
                     cur.close()
                     return False, 'indicator_unpublished', {}
+                if original.get('review_status') not in (None, '', 'approved'):
+                    cur.close()
+                    return False, 'indicator_unavailable', {}
 
                 asset_type = str(original.get('asset_type') or 'indicator').strip().lower()
                 if asset_type == 'script_template':
@@ -1624,6 +1630,7 @@ class CommunityService:
                         i.pricing_type, i.price, i.vip_free,
                         i.purchase_count, i.avg_rating, i.rating_count,
                         i.view_count, i.review_status, i.review_note,
+                        COALESCE(i.asset_type, 'indicator') as asset_type,
                         i.created_at, i.updated_at,
                         COALESCE((
                             SELECT SUM(p.price)
@@ -1657,6 +1664,7 @@ class CommunityService:
                         'view_count': int(row['view_count'] or 0),
                         'review_status': row.get('review_status') or 'approved',
                         'review_note': row.get('review_note') or '',
+                        'asset_type': row.get('asset_type') or 'indicator',
                         'revenue': float(row.get('revenue') or 0),
                         'created_at': row['created_at'].isoformat() if row.get('created_at') else None,
                         'updated_at': row['updated_at'].isoformat() if row.get('updated_at') else None,
@@ -1832,7 +1840,12 @@ class CommunityService:
                 
                 # 检查指标是否存在
                 cur.execute(
-                    "SELECT id, user_id FROM qd_indicator_codes WHERE id = ? AND publish_to_community = 1",
+                    """
+                    SELECT id, user_id
+                    FROM qd_indicator_codes
+                    WHERE id = ? AND publish_to_community = 1
+                      AND (review_status = 'approved' OR review_status IS NULL)
+                    """,
                     (indicator_id,)
                 )
                 indicator = cur.fetchone()
@@ -2020,7 +2033,8 @@ class CommunityService:
                 query_sql = f"""
                     SELECT 
                         i.id, i.name, i.description, i.pricing_type, i.price,
-                        i.preview_image, i.code, i.review_status, i.review_note, 
+                        i.preview_image, i.code, i.review_status, i.review_note,
+                        COALESCE(i.asset_type, 'indicator') as asset_type,
                         i.reviewed_at, i.reviewed_by, i.created_at,
                         u.id as author_id, u.username as author_username, 
                         u.nickname as author_nickname, u.avatar as author_avatar,
@@ -2048,6 +2062,7 @@ class CommunityService:
                         'code': row['code'] or '',  # 管理员可以看代码
                         'review_status': row['review_status'] or 'pending',
                         'review_note': row['review_note'] or '',
+                        'asset_type': row.get('asset_type') or 'indicator',
                         'reviewed_at': row['reviewed_at'].isoformat() if row['reviewed_at'] else None,
                         'reviewer_username': row['reviewer_username'],
                         'created_at': row['created_at'].isoformat() if row['created_at'] else None,
@@ -2190,8 +2205,8 @@ class CommunityService:
                 cur = db.cursor()
                 cur.execute("""
                     SELECT 
-                        COUNT(*) FILTER (WHERE review_status = 'pending' OR review_status IS NULL) as pending_count,
-                        COUNT(*) FILTER (WHERE review_status = 'approved') as approved_count,
+                        COUNT(*) FILTER (WHERE review_status = 'pending') as pending_count,
+                        COUNT(*) FILTER (WHERE review_status = 'approved' OR review_status IS NULL) as approved_count,
                         COUNT(*) FILTER (WHERE review_status = 'rejected') as rejected_count
                     FROM qd_indicator_codes
                     WHERE publish_to_community = 1

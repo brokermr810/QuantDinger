@@ -4,7 +4,7 @@ Trading Strategy API Routes
 from flask import g, jsonify, request
 from app.openapi.blueprint import HumanBlueprint as Blueprint
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Dict, List, Optional, Tuple
 import json
 import re
 import traceback
@@ -36,6 +36,102 @@ from app.utils.pnl import (
 logger = get_logger(__name__)
 
 strategy_blp = Blueprint('strategy', __name__)
+
+
+def _strategy_live_lock_key(strategy: Dict[str, Any], user_id: int) -> Optional[Tuple[Any, ...]]:
+    """Return the account/symbol key that cannot run twice for live strategies."""
+    execution_mode = str(strategy.get("execution_mode") or "signal").strip().lower()
+    if execution_mode != "live":
+        return None
+
+    trading_config = strategy.get("trading_config") if isinstance(strategy.get("trading_config"), dict) else {}
+    exchange_config = strategy.get("exchange_config") if isinstance(strategy.get("exchange_config"), dict) else {}
+
+    try:
+        from app.services.exchange_execution import resolve_exchange_config
+        from app.services.live_trading.leg_context import credential_id_from_exchange_config
+        from app.services.live_trading.records import normalize_strategy_symbol
+
+        resolved_exchange = resolve_exchange_config(exchange_config, user_id=int(user_id or strategy.get("user_id") or 1))
+        exchange_id = str(
+            resolved_exchange.get("exchange_id")
+            or exchange_config.get("exchange_id")
+            or ""
+        ).strip().lower()
+        if not exchange_id:
+            return None
+
+        credential_id = int(credential_id_from_exchange_config(resolved_exchange) or credential_id_from_exchange_config(exchange_config) or 0)
+        credential_key: Any = credential_id if credential_id > 0 else f"inline:{exchange_id}"
+
+        market_type = str(
+            trading_config.get("market_type")
+            or strategy.get("market_type")
+            or resolved_exchange.get("market_type")
+            or "swap"
+        ).strip().lower()
+        if market_type in ("futures", "future", "perp", "perpetual"):
+            market_type = "swap"
+
+        symbol = (
+            strategy.get("symbol")
+            or trading_config.get("symbol")
+            or ""
+        )
+        symbol = normalize_strategy_symbol(str(symbol or "").strip()).upper()
+        if not symbol:
+            return None
+
+        return (int(user_id or strategy.get("user_id") or 0), credential_key, exchange_id, market_type, symbol)
+    except Exception as e:
+        logger.warning("strategy live lock key failed for strategy %s: %s", strategy.get("id"), e)
+        return None
+
+
+def _find_live_strategy_conflict(strategy: Dict[str, Any], user_id: int) -> Optional[Dict[str, Any]]:
+    """Find another running live strategy using the same account + market + symbol."""
+    key = _strategy_live_lock_key(strategy, user_id)
+    if not key:
+        return None
+    sid = int(strategy.get("id") or 0)
+    with get_db_connection() as db:
+        cur = db.cursor()
+        cur.execute(
+            """
+            SELECT id
+            FROM qd_strategies_trading
+            WHERE user_id = ? AND status = 'running' AND execution_mode = 'live' AND id <> ?
+            """,
+            (int(user_id), sid),
+        )
+        rows = cur.fetchall() or []
+        cur.close()
+
+    service = get_strategy_service()
+    for row in rows:
+        other_id = int(row.get("id") or 0)
+        other = service.get_strategy(other_id, user_id=user_id)
+        if not other:
+            continue
+        if _strategy_live_lock_key(other, user_id) == key:
+            return {
+                "strategy_id": other_id,
+                "strategy_name": other.get("strategy_name") or other.get("name") or str(other_id),
+                "symbol": key[-1],
+                "market_type": key[-2],
+                "exchange_id": key[-3],
+            }
+    return None
+
+
+def _live_conflict_message(conflict: Dict[str, Any]) -> str:
+    return (
+        "Live strategy conflict: another running strategy already uses the same "
+        f"API key/exchange/market/symbol ({conflict.get('exchange_id')} "
+        f"{conflict.get('market_type')} {conflict.get('symbol')}). "
+        f"Please stop strategy {conflict.get('strategy_id')} "
+        f"({conflict.get('strategy_name')}) first."
+    )
 
 
 def _normalize_trade_row_for_api(trade: dict, *, leverage: float = 1.0, market_type: str = "spot") -> dict:
@@ -599,6 +695,45 @@ def batch_start_strategies():
         
         if not strategy_ids:
             return jsonify({'code': 0, 'msg': 'Please provide strategy IDs', 'data': None}), 400
+
+        seen_live_keys: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+        batch_conflicts: List[Dict[str, Any]] = []
+        for sid in strategy_ids:
+            st = get_strategy_service().get_strategy(int(sid), user_id=user_id)
+            if not st:
+                continue
+            existing_conflict = _find_live_strategy_conflict(st, user_id)
+            if existing_conflict:
+                batch_conflicts.append({
+                    'strategy_id': int(sid),
+                    'conflict': existing_conflict,
+                    'message': _live_conflict_message(existing_conflict),
+                })
+                continue
+            key = _strategy_live_lock_key(st, user_id)
+            if key and key in seen_live_keys:
+                other = seen_live_keys[key]
+                conflict = {
+                    'strategy_id': other.get('id'),
+                    'strategy_name': other.get('strategy_name') or other.get('name') or str(other.get('id')),
+                    'symbol': key[-1],
+                    'market_type': key[-2],
+                    'exchange_id': key[-3],
+                }
+                batch_conflicts.append({
+                    'strategy_id': int(sid),
+                    'conflict': conflict,
+                    'message': _live_conflict_message(conflict),
+                })
+            elif key:
+                seen_live_keys[key] = st
+
+        if batch_conflicts:
+            return jsonify({
+                'code': 0,
+                'msg': 'Live strategy conflict',
+                'data': {'conflicts': batch_conflicts},
+            }), 409
         
         # Update database status first
         result = get_strategy_service().batch_start_strategies(strategy_ids, user_id=user_id)
@@ -772,6 +907,10 @@ def get_trades():
         market_type = str(trading_config.get("market_type") or st.get("market_type") or "swap").strip().lower()
         if is_derivatives_market(market_type):
             market_type = "swap"
+        try:
+            initial_capital = float(st.get("initial_capital") or trading_config.get("initial_capital") or 0.0)
+        except Exception:
+            initial_capital = 0.0
         from app.services.live_trading.records import ensure_strategy_trades_close_reason_column
         ensure_strategy_trades_close_reason_column()
 
@@ -803,6 +942,8 @@ def get_trades():
         # the stored wall clock is UTC. Naive datetime must not use .timestamp() alone — that would
         # interpret it in the Python process local TZ and shift the instant (e.g. +8h on CN laptops).
         from datetime import datetime as _dt, timezone as _tz
+        from app.utils.trade_close_reason import enrich_trade_row
+        from app.utils.trade_net_pnl import enrich_trades_net_pnl
         processed_rows = []
         for row in rows:
             trade = dict(row)
@@ -821,8 +962,6 @@ def get_trades():
                         trade['created_at'] = int(dt.timestamp())
                     except Exception:
                         pass
-            from app.utils.trade_close_reason import enrich_trade_row
-            from app.utils.trade_net_pnl import enrich_trades_net_pnl
 
             trade = enrich_trade_row(trade, bot_type=bot_type, lang=lang)
             processed_rows.append(trade)
@@ -896,6 +1035,10 @@ def get_positions():
         market_type = str(trading_config.get("market_type") or st.get("market_type") or "swap").strip().lower()
         if is_derivatives_market(market_type):
             market_type = "swap"
+        try:
+            initial_capital = float(st.get("initial_capital") or trading_config.get("initial_capital") or 0.0)
+        except Exception:
+            initial_capital = 0.0
 
         exchange_config = st.get("exchange_config") if isinstance(st.get("exchange_config"), dict) else {}
         from app.data_sources.crypto import resolve_crypto_venue
@@ -1009,6 +1152,9 @@ def get_positions():
                 pnl = calc_unrealized_pnl(side, entry, cp, size)
                 pct = calc_pnl_percent(entry, size, pnl, leverage=leverage, market_type=market_type)
                 notional = calc_notional_value(entry, size)
+                margin_value = calc_margin_notional(notional, leverage, market_type)
+                notional_pct = (pnl / notional * 100.0) if notional > 0 else 0.0
+                capital_pct = (pnl / initial_capital * 100.0) if initial_capital > 0 else 0.0
 
                 rr = dict(r)
                 # 确保 entry_price 有值（如果数据库中是 NULL，使用计算出的 entry 值）
@@ -1019,8 +1165,12 @@ def get_positions():
                 rr["current_price"] = float(cp or 0.0)
                 rr["unrealized_pnl"] = float(pnl)
                 rr["pnl_percent"] = float(pct)
+                rr["position_margin_pnl_percent"] = float(pct)
+                rr["position_notional_pnl_percent"] = float(notional_pct)
+                rr["strategy_capital_pnl_percent"] = float(capital_pct)
+                rr["capital_contribution_percent"] = float(capital_pct)
                 rr["notional_value"] = float(notional)
-                rr["margin_value"] = calc_margin_notional(notional, leverage, market_type)
+                rr["margin_value"] = margin_value
                 rr["updated_at"] = now
                 out.append(rr)
 
@@ -1061,6 +1211,45 @@ def get_positions():
                 if normalize_strategy_symbol(str(r.get("symbol") or "")).upper() in allowed_upper
             ]
 
+        account_reconciliation = {
+            "status": "not_checked",
+            "notes": [],
+            "account_positions": [],
+        }
+        if execution_mode == "live":
+            try:
+                from app.services.exchange_execution import resolve_exchange_config
+                from app.services.live_trading.account_positions import (
+                    list_account_positions,
+                    reconcile_strategy_vs_account,
+                )
+                from app.services.live_trading.leg_context import credential_id_from_exchange_config
+
+                resolved_ex = resolve_exchange_config(exchange_config, user_id=int(user_id or 1))
+                cred_id = int(
+                    credential_id_from_exchange_config(resolved_ex)
+                    or credential_id_from_exchange_config(exchange_config)
+                    or 0
+                )
+                account_rows = list_account_positions(
+                    user_id=int(user_id),
+                    credential_id=cred_id if cred_id > 0 else None,
+                    market_type=market_type,
+                )
+                if allowed:
+                    account_rows = [
+                        r for r in account_rows
+                        if normalize_strategy_symbol(str(r.get("symbol") or "")).upper() in allowed_upper
+                    ]
+                account_reconciliation = reconcile_strategy_vs_account(out, account_rows)
+                account_reconciliation["account_positions"] = account_rows
+            except Exception as e:
+                account_reconciliation = {
+                    "status": "error",
+                    "notes": [str(e)],
+                    "account_positions": [],
+                }
+
         from app.services.live_trading.strategy_position_sync import strategy_uses_fill_ledger
 
         uses_fill_ledger = strategy_uses_fill_ledger(
@@ -1072,7 +1261,7 @@ def get_positions():
         )
         position_meta = {
             "source": "fill_ledger" if uses_fill_ledger else "strategy_ledger",
-            "synced_from_exchange": execution_mode == "live" and not uses_fill_ledger,
+            "synced_from_exchange": False,
             "hint_zh": (
                 "以下为策略账本持仓（由成交记录累计），网格策略不与交易所实时对账。"
                 "请对照 exchange_snapshot 查看交易所真实持仓。"
@@ -1083,7 +1272,7 @@ def get_positions():
                 "Strategy ledger positions (from fills). Grid bots skip live exchange reconciliation; "
                 "compare exchange_snapshot for actual exchange holdings."
                 if uses_fill_ledger
-                else "Strategy ledger positions, reconciled with the exchange when live."
+                else "Strategy ledger positions from this strategy's own fills. Exchange positions are only reconciliation hints."
             ),
         }
 
@@ -1117,6 +1306,7 @@ def get_positions():
                 'items': out,
                 'position_meta': position_meta,
                 'exchange_snapshot': exchange_snapshot,
+                'account_reconciliation': account_reconciliation,
             },
         })
     except Exception as e:
@@ -1416,6 +1606,15 @@ def stop_strategy():
         st = get_strategy_service().get_strategy(strategy_id, user_id=user_id)
         if not st:
             return jsonify({'code': 0, 'msg': 'Strategy not found', 'data': None}), 404
+
+        conflict = _find_live_strategy_conflict(st, user_id)
+        if conflict:
+            msg = _live_conflict_message(conflict)
+            return jsonify({
+                'code': 0,
+                'msg': msg,
+                'data': {'conflict': conflict},
+            }), 409
         
         # Get strategy type
         strategy_type = get_strategy_service().get_strategy_type(strategy_id)
@@ -2329,21 +2528,20 @@ Generate Python strategy code that follows this framework:
 - def on_init(ctx): Initialize strategy parameters using ctx.param(name, default)
 - def on_bar(ctx, bar): Core logic called on each K-line bar
   - bar supports both bar.close and bar['close'] access, and has: open, high, low, close, volume, timestamp
-  - ctx.buy(price, amount), ctx.sell(price, amount), ctx.close_position()
+  - Preferred actions: ctx.open_long/open_short(amount, price), ctx.add_long/add_short(amount, price), ctx.close_long/close_short(amount=None, price=None), ctx.close_position(); ctx.buy/sell are legacy helpers
   - ctx.position supports both numeric checks and dict-style fields:
     - if not ctx.position / if ctx.position > 0 / if ctx.position < 0
     - ctx.position['side'], ctx.position['size'], ctx.position['entry_price']
   - ctx.balance, ctx.equity
   - ctx.bars(n) to get last N bars, ctx.log(message) to log
-- def on_order_filled(ctx, order): Optional callback when order fills
-- def on_stop(ctx): Optional cleanup when strategy stops
-
 Return ONLY the Python code, no explanations.
 
 Quality rules:
 - Always define both on_init(ctx) and on_bar(ctx, bar)
 - Prefer reading defaults via ctx.param(...)
-- Use ctx.buy / ctx.sell / ctx.close_position for order intent
+- Use open_long/open_short for first entries, add_long/add_short only for intentional scale-ins, and close_long/close_short/close_position for exits
+- Entry logic must be event-based: use cross_up = prev_fast <= prev_slow and fast > slow, breakout = prev_close <= level and close > level. Do NOT enter on persistent states like `if not ctx.position and fast > slow:`.
+- Scale-ins must have layer count, price distance/cooldown, and max layers; call ctx.add_long/add_short, not ctx.buy/ctx.sell.
 - Generated code must compile cleanly
 - Avoid markdown fences or explanatory text
 
@@ -2428,8 +2626,8 @@ Strategy runtime framework context:
                 "# Repair requirements\n"
                 "- Must define both on_init(ctx) and on_bar(ctx, bar).\n"
                 "- Must compile and run in QuantDinger strategy runtime.\n"
-                "- Prefer ctx.param(...) for defaults.\n"
-                "- Use ctx.buy / ctx.sell / ctx.close_position for actions.\n"
+                "- Prefer ctx.param(...) for defaults; use explicit open/add/close actions.\n"
+                "- Entry conditions must be edge/crossing events; scale-ins must call add_long/add_short deliberately.\n"
                 "- Return Python only, no markdown, no explanation."
             )
             repaired_content = llm.call_llm_api(

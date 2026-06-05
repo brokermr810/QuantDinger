@@ -4,6 +4,7 @@ Backtest Service
 import hashlib
 import json
 import math
+import re
 import threading
 import time as _time
 import traceback
@@ -91,6 +92,97 @@ class BacktestService:
 
     def __init__(self):
         self._storage_schema_ready = False
+
+    def _estimate_warmup_bars(
+        self,
+        indicator_code: str,
+        indicator_params: Optional[Dict[str, Any]] = None,
+    ) -> int:
+        """Estimate indicator warmup bars from declared numeric period params."""
+        try:
+            declared = IndicatorParamsParser.parse_params(indicator_code or "")
+            merged = IndicatorParamsParser.merge_params(declared, indicator_params or {})
+        except Exception:
+            merged = {}
+
+        max_period = 0
+        period_name_re = re.compile(
+            r"(len|length|period|window|lookback|ema|sma|rsi|adx|atr|vol|ma)$",
+            re.IGNORECASE,
+        )
+        for key, value in (merged or {}).items():
+            name = str(key or "")
+            try:
+                n = int(float(value))
+            except Exception:
+                continue
+            if n <= 1 or n > 10000:
+                continue
+            if period_name_re.search(name) or name.endswith("_n"):
+                max_period = max(max_period, n)
+
+        if max_period <= 0:
+            return 0
+        return int(min(max_period + max(50, math.ceil(max_period * 0.5)), 2000))
+
+    def _warmup_start_date(self, start_date: datetime, timeframe: str, warmup_bars: int) -> datetime:
+        if warmup_bars <= 0:
+            return start_date
+        tf_seconds = self.TIMEFRAME_SECONDS.get(timeframe, 86400)
+        return start_date - timedelta(seconds=tf_seconds * warmup_bars)
+
+    def _slice_to_backtest_window(
+        self,
+        df: pd.DataFrame,
+        start_date: datetime,
+        end_date: datetime,
+    ) -> pd.DataFrame:
+        if df is None or df.empty:
+            return pd.DataFrame()
+        rs = pd.Timestamp(start_date)
+        re = pd.Timestamp(end_date)
+        out = df[(df.index >= rs) & (df.index <= re)].copy()
+        if getattr(df, "attrs", None):
+            out.attrs.update(df.attrs)
+        return out
+
+    def _slice_signals_to_window(
+        self,
+        signals: Dict[str, Any],
+        target_index: pd.Index,
+    ) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        for key, value in (signals or {}).items():
+            if str(key).startswith("_"):
+                out[key] = value
+                continue
+            if hasattr(value, "reindex"):
+                fill = False
+                try:
+                    if getattr(value, "dtype", None) is not None and not pd.api.types.is_bool_dtype(value):
+                        fill = 0.0
+                except Exception:
+                    fill = False
+                out[key] = value.reindex(target_index, fill_value=fill)
+            else:
+                out[key] = value
+        return out
+
+    def _attach_warmup_to_result(
+        self,
+        result: Dict[str, Any],
+        *,
+        warmup_bars: int,
+        warmup_start: datetime,
+        requested_start: datetime,
+    ) -> None:
+        if warmup_bars <= 0:
+            return
+        ea = dict(result.get("executionAssumptions") or {})
+        ea["indicatorWarmupBars"] = int(warmup_bars)
+        ea["indicatorWarmupStart"] = str(warmup_start)
+        ea["requestedStart"] = str(requested_start)
+        result["executionAssumptions"] = ea
 
     def ensure_storage_schema(self) -> None:
         if self._storage_schema_ready:
@@ -612,11 +704,17 @@ class BacktestService:
             result['executionAssumptions'] = ea
             return result
         
-        logger.info(f"Multi-timeframe backtest: strategy_tf={timeframe}, exec_tf={exec_tf}, range={start_date} ~ {end_date}")
+        warmup_bars = self._estimate_warmup_bars(indicator_code, indicator_params)
+        signal_start_date = self._warmup_start_date(start_date, timeframe, warmup_bars)
+
+        logger.info(
+            f"Multi-timeframe backtest: strategy_tf={timeframe}, exec_tf={exec_tf}, "
+            f"range={start_date} ~ {end_date}, warmup_bars={warmup_bars}"
+        )
         
         # 1. Fetch strategy timeframe candles (for signal generation)
-        df_signal = self._fetch_kline_data(market, symbol, timeframe, start_date, end_date)
-        if df_signal.empty:
+        df_signal_full = self._fetch_kline_data(market, symbol, timeframe, signal_start_date, end_date)
+        if df_signal_full.empty:
             raise ValueError("No candle data available in the backtest date range")
         
         # 2. Execute indicator code to get signals
@@ -629,7 +727,11 @@ class BacktestService:
             'user_id': user_id,
             'indicator_id': indicator_id,
         }
-        signals = self._execute_indicator(indicator_code, df_signal, backtest_params)
+        signals_full = self._execute_indicator(indicator_code, df_signal_full, backtest_params)
+        df_signal = self._slice_to_backtest_window(df_signal_full, start_date, end_date)
+        if df_signal.empty:
+            raise ValueError("No candle data available in the backtest date range")
+        signals = self._slice_signals_to_window(signals_full, df_signal.index)
         logger.info(f"Signals generated: {list(signals.keys()) if isinstance(signals, dict) else type(signals)}")
         
         # 3. Fetch execution timeframe candles (for precise trade simulation)
@@ -1750,11 +1852,13 @@ class BacktestService:
             'trade_direction': trade_direction,
             'strategy_config': strategy_config or {},
         })
+        script_logs = signals.pop('logs', [])
         equity_curve, trades, total_commission = self._simulate_trading(
             df, signals, initial_capital, commission, slippage, leverage, trade_direction, strategy_config
         )
         metrics = self._calculate_metrics(equity_curve, trades, initial_capital, timeframe, start_date, end_date, total_commission)
         result = self._format_result(metrics, equity_curve, trades)
+        result['logs'] = script_logs
         result['precision_info'] = {
             'enabled': False,
             'timeframe': timeframe,
@@ -2004,9 +2108,13 @@ class BacktestService:
             Backtest result
         """
         
-        # 1. Fetch candle data
-        df = self._fetch_kline_data(market, symbol, timeframe, start_date, end_date)
-        if df.empty:
+        warmup_bars = self._estimate_warmup_bars(indicator_code, indicator_params)
+        signal_start_date = self._warmup_start_date(start_date, timeframe, warmup_bars)
+
+        # 1. Fetch candle data. Indicators execute on warmup+window data, while
+        # trading starts strictly at the user-requested start_date.
+        df_full = self._fetch_kline_data(market, symbol, timeframe, signal_start_date, end_date)
+        if df_full.empty:
             raise ValueError("No candle data available in the backtest date range")
         
 
@@ -2020,7 +2128,11 @@ class BacktestService:
             'user_id': user_id,
             'indicator_id': indicator_id,
         }
-        signals = self._execute_indicator(indicator_code, df, backtest_params)
+        signals_full = self._execute_indicator(indicator_code, df_full, backtest_params)
+        df = self._slice_to_backtest_window(df_full, start_date, end_date)
+        if df.empty:
+            raise ValueError("No candle data available in the backtest date range")
+        signals = self._slice_signals_to_window(signals_full, df.index)
         
         # 3. Simulate trading
         equity_curve, trades, total_commission = self._simulate_trading(
@@ -2044,6 +2156,12 @@ class BacktestService:
             strategy_config,
             simulation_mode='standard',
             signal_timeframe=timeframe,
+        )
+        self._attach_warmup_to_result(
+            result,
+            warmup_bars=warmup_bars,
+            warmup_start=signal_start_date,
+            requested_start=start_date,
         )
         self._attach_actual_range_to_result(result, df)
         return result
@@ -2380,7 +2498,7 @@ class BacktestService:
         
         return signals
 
-    def _execute_script_strategy(self, code: str, df: pd.DataFrame, runtime: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
+    def _execute_script_strategy(self, code: str, df: pd.DataFrame, runtime: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         runtime = runtime or {}
         if not code or not str(code).strip():
             raise ValueError("Strategy script is empty")
