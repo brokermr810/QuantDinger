@@ -1001,6 +1001,45 @@ class StrategyService:
         execution_mode = payload.get('execution_mode') or 'signal'
         notification_config = payload.get('notification_config') or {}
 
+        # Merge user notification settings into strategy config targets at creation
+        try:
+            with get_db_connection() as db:
+                cur = db.cursor()
+                cur.execute(
+                    "SELECT email, notification_settings FROM qd_users WHERE id = ?",
+                    (int(user_id),),
+                )
+                user_row = cur.fetchone()
+                cur.close()
+            if user_row:
+                user_email = (user_row.get("email") or "").strip()
+                user_settings = self._safe_json_loads(user_row.get("notification_settings"), {})
+                
+                if not isinstance(notification_config, dict):
+                    notification_config = {}
+                if 'targets' not in notification_config or not isinstance(notification_config['targets'], dict):
+                    notification_config['targets'] = {}
+                
+                targets = notification_config['targets']
+                
+                # Merge target configuration from user settings
+                if not targets.get("email") and (user_settings.get("email") or user_email):
+                    targets["email"] = (user_settings.get("email") or user_email).strip()
+                if not targets.get("telegram") and user_settings.get("telegram_chat_id"):
+                    targets["telegram"] = str(user_settings.get("telegram_chat_id")).strip()
+                if not targets.get("telegram_bot_token") and user_settings.get("telegram_bot_token"):
+                    targets["telegram_bot_token"] = str(user_settings.get("telegram_bot_token")).strip()
+                if not targets.get("discord") and user_settings.get("discord_webhook"):
+                    targets["discord"] = str(user_settings.get("discord_webhook")).strip()
+                if not targets.get("webhook") and user_settings.get("webhook_url"):
+                    targets["webhook"] = str(user_settings.get("webhook_url")).strip()
+                if not targets.get("webhook_token") and user_settings.get("webhook_token"):
+                    targets["webhook_token"] = str(user_settings.get("webhook_token")).strip()
+                if not targets.get("webhook_signing_secret") and user_settings.get("webhook_signing_secret"):
+                    targets["webhook_signing_secret"] = str(user_settings.get("webhook_signing_secret")).strip()
+        except Exception as e:
+            logger.warning(f"Failed to merge user notification settings in create_strategy: {e}")
+
         indicator_config = payload.get('indicator_config') or {}
         trading_config = payload.get('trading_config') or {}
         from app.services.exchange_execution import coalesce_exchange_config_from_payload, resolve_exchange_config
@@ -1314,6 +1353,47 @@ class StrategyService:
         market_category = payload.get('market_category') or existing.get('market_category') or 'Crypto'
         execution_mode = payload.get('execution_mode') or existing.get('execution_mode') or 'signal'
         notification_config = payload.get('notification_config') if payload.get('notification_config') is not None else (existing.get('notification_config') or {})
+
+        # Merge user notification settings into strategy config targets at update
+        if payload.get('notification_config') is not None:
+            try:
+                eff_user_id = user_id or existing.get('user_id') or 1
+                with get_db_connection() as db:
+                    cur = db.cursor()
+                    cur.execute(
+                        "SELECT email, notification_settings FROM qd_users WHERE id = ?",
+                        (int(eff_user_id),),
+                    )
+                    user_row = cur.fetchone()
+                    cur.close()
+                if user_row:
+                    user_email = (user_row.get("email") or "").strip()
+                    user_settings = self._safe_json_loads(user_row.get("notification_settings"), {})
+                    
+                    if not isinstance(notification_config, dict):
+                        notification_config = {}
+                    if 'targets' not in notification_config or not isinstance(notification_config['targets'], dict):
+                        notification_config['targets'] = {}
+                    
+                    targets = notification_config['targets']
+                    
+                    # Merge target configuration from user settings
+                    if not targets.get("email") and (user_settings.get("email") or user_email):
+                        targets["email"] = (user_settings.get("email") or user_email).strip()
+                    if not targets.get("telegram") and user_settings.get("telegram_chat_id"):
+                        targets["telegram"] = str(user_settings.get("telegram_chat_id")).strip()
+                    if not targets.get("telegram_bot_token") and user_settings.get("telegram_bot_token"):
+                        targets["telegram_bot_token"] = str(user_settings.get("telegram_bot_token")).strip()
+                    if not targets.get("discord") and user_settings.get("discord_webhook"):
+                        targets["discord"] = str(user_settings.get("discord_webhook")).strip()
+                    if not targets.get("webhook") and user_settings.get("webhook_url"):
+                        targets["webhook"] = str(user_settings.get("webhook_url")).strip()
+                    if not targets.get("webhook_token") and user_settings.get("webhook_token"):
+                        targets["webhook_token"] = str(user_settings.get("webhook_token")).strip()
+                    if not targets.get("webhook_signing_secret") and user_settings.get("webhook_signing_secret"):
+                        targets["webhook_signing_secret"] = str(user_settings.get("webhook_signing_secret")).strip()
+            except Exception as e:
+                logger.warning(f"Failed to merge user notification settings in update_strategy: {e}")
 
         indicator_config = payload.get('indicator_config') if payload.get('indicator_config') is not None else (existing.get('indicator_config') or {})
         exchange_config = payload.get('exchange_config') if payload.get('exchange_config') is not None else (existing.get('exchange_config') or {})

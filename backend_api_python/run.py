@@ -18,6 +18,7 @@ except Exception:
 # This keeps local deployment simple: edit one file and run.
 try:
     from dotenv import load_dotenv
+
     this_dir = os.path.dirname(os.path.abspath(__file__))
     # Primary: backend_api_python/.env (same dir as run.py)
     load_dotenv(os.path.join(this_dir, ".env"), override=False)
@@ -57,6 +58,7 @@ _CN_FINANCIAL_DOMAINS = ",".join([
     ".finance.sina.com.cn",
 ])
 
+
 def _apply_proxy_env():
     def _set_if_blank(key: str, value: str) -> None:
         """
@@ -88,6 +90,7 @@ def _apply_proxy_env():
     os.environ['NO_PROXY'] = merged
     os.environ['no_proxy'] = merged
 
+
 _apply_proxy_env()
 
 # Add project root to Python path
@@ -105,7 +108,7 @@ def main():
     """启动应用"""
     # Keep startup messages ASCII-only and short.
     print("QuantDinger Python API v2.2.2")
-    
+
     # ========== Critical Security Check for SECRET_KEY ==========
     # In production (DEBUG=False), the SECRET_KEY MUST NOT use the default example value.
     # This prevents attackers from forging JWT tokens with admin privileges.
@@ -117,9 +120,9 @@ def main():
         os.environ["SECRET_KEY"] = new_key
         print("[AUTO] SECRET_KEY was default; generated random key for this session.")
         print("[TIP]  Set a persistent SECRET_KEY in backend_api_python/.env for production.")
-    
+
     print(f"Service starting at: http://{Config.HOST}:{Config.PORT}")
-    
+
     # Flask dev server is for local development only.
     app.run(
         host=Config.HOST,

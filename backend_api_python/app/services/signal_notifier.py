@@ -315,28 +315,57 @@ def _signal_meta(signal_type: str) -> Dict[str, str]:
     return {"action": action, "side": side, "type": st}
 
 
-def _load_user_timezone_for_strategy(strategy_id: int) -> str:
-    try:
-        sid = int(strategy_id)
-    except Exception:
-        return ""
+_strategy_user_info_cache = {}  # {strategy_id: (info_dict, expiry_timestamp)}
+STRATEGY_CACHE_TTL = 600.0  # 10 min
+
+def _get_strategy_user_info(strategy_id: int) -> Dict[str, Any]:
+    """Get strategy's user timezone, email, and notification_settings, with a 60s TTL cache."""
+    now = time.time()
+    cached = _strategy_user_info_cache.get(strategy_id)
+    if cached:
+        val, expiry = cached
+        if now < expiry:
+            return val
+
+    # Load from DB
     try:
         with get_db_connection() as db:
             cur = db.cursor()
             cur.execute(
                 """
-                SELECT COALESCE(u.timezone, '') AS tz
+                SELECT s.user_id, COALESCE(u.timezone, '') AS tz, u.email, u.notification_settings
                 FROM qd_strategies_trading s
                 JOIN qd_users u ON u.id = s.user_id
                 WHERE s.id = ?
                 """,
-                (sid,),
+                (strategy_id,),
             )
-            row = cur.fetchone() or {}
+            row = cur.fetchone()
             cur.close()
-        return str(row.get("tz") or "").strip()
+        if row:
+            res = {
+                "user_id": int(row.get("user_id") or 1),
+                "timezone": str(row.get("tz") or "").strip(),
+                "email": str(row.get("email") or "").strip(),
+                "notification_settings": _safe_json(row.get("notification_settings") or {}),
+            }
+        else:
+            res = {"user_id": 1, "timezone": "", "email": "", "notification_settings": {}}
+    except Exception as e:
+        logger.warning(f"Failed to load strategy user info for strategy {strategy_id}: {e}")
+        res = {"user_id": 1, "timezone": "", "email": "", "notification_settings": {}}
+
+    _strategy_user_info_cache[strategy_id] = (res, now + STRATEGY_CACHE_TTL)
+    return res
+
+
+def _load_user_timezone_for_strategy(strategy_id: int) -> str:
+    try:
+        sid = int(strategy_id)
     except Exception:
         return ""
+    info = _get_strategy_user_info(sid)
+    return info.get("timezone", "")
 
 
 def _utc_ts_to_user_display(now: int, user_timezone: str) -> Tuple[str, str, str]:
@@ -421,7 +450,30 @@ class SignalNotifier:
         if not channels:
             channels = ["browser"]
 
-        targets = _safe_json(cfg.get("targets") or {})
+        targets = dict(_safe_json(cfg.get("targets") or {}))
+
+        # Merge user settings dynamically with caching
+        try:
+            user_info = _get_strategy_user_info(int(strategy_id))
+            user_email = user_info.get("email", "")
+            user_settings = user_info.get("notification_settings", {})
+            
+            if not targets.get("email") and (user_settings.get("email") or user_email):
+                targets["email"] = (user_settings.get("email") or user_email).strip()
+            if not targets.get("telegram") and user_settings.get("telegram_chat_id"):
+                targets["telegram"] = str(user_settings.get("telegram_chat_id")).strip()
+            if not targets.get("telegram_bot_token") and user_settings.get("telegram_bot_token"):
+                targets["telegram_bot_token"] = str(user_settings.get("telegram_bot_token")).strip()
+            if not targets.get("discord") and user_settings.get("discord_webhook"):
+                targets["discord"] = str(user_settings.get("discord_webhook")).strip()
+            if not targets.get("webhook") and user_settings.get("webhook_url"):
+                targets["webhook"] = str(user_settings.get("webhook_url")).strip()
+            if not targets.get("webhook_token") and user_settings.get("webhook_token"):
+                targets["webhook_token"] = str(user_settings.get("webhook_token")).strip()
+            if not targets.get("webhook_signing_secret") and user_settings.get("webhook_signing_secret"):
+                targets["webhook_signing_secret"] = str(user_settings.get("webhook_signing_secret")).strip()
+        except Exception as e:
+            logger.warning(f"notify_signal: merge cached user settings for strategy {strategy_id} failed: {e}")
         extra = extra if isinstance(extra, dict) else {}
 
         user_tz = _load_user_timezone_for_strategy(int(strategy_id))
