@@ -54,6 +54,17 @@ def get_kline():
             before_time=before_time
         )
         
+        resolved_symbol = symbol
+        if market == 'Crypto' and klines:
+            try:
+                from app.data_sources import DataSourceFactory
+                from app.data_sources.crypto import CryptoDataSource
+                source = DataSourceFactory.get_source(market)
+                if isinstance(source, CryptoDataSource):
+                    resolved_symbol = source._symbol_for_scoped_market(symbol)
+            except Exception as ex:
+                logger.warning(f"Failed to resolve symbol for frontend: {ex}")
+        
         if not klines:
             # 针对特定情况给出更详细的提示
             msg = 'No data found'
@@ -71,7 +82,8 @@ def get_kline():
         return jsonify({
             'code': 1,
             'msg': 'success',
-            'data': klines
+            'data': klines,
+            'symbol': resolved_symbol
         })
         
     except Exception as e:

@@ -92,7 +92,7 @@ BOT_TYPE_MARKETS: Dict[str, Set[str]] = {
 # Markets we recognize as legal canonical values. Anything outside this set
 # is considered analysis/backtest-only (e.g. CNStock, HKStock, MOEX, Futures
 # generic) and may not be used for live strategies.
-LIVE_MARKET_CATEGORIES: Set[str] = {"Crypto", "USStock", "Forex"}
+LIVE_MARKET_CATEGORIES: Set[str] = {"CNStock", "Crypto", "USStock", "Forex"}
 
 
 # ---------------------------------------------------------------------------

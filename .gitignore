@@ -11,9 +11,9 @@
 /QuantDinger-Vue/
 /QuantDinger-Mobile/
 # Build artefacts are committed for Docker-only deployments
-!/frontend/
-!/frontend/dist/
-!/frontend/dist/**
+/frontend/
+/frontend/dist/
+/frontend/dist/**
 
 # ========================
 # Environment & Secrets
