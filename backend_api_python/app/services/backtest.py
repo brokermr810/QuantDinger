@@ -832,12 +832,7 @@ class BacktestService:
                 mtf_requested=True,
                 mtf_active=True,
             )
-            self._attach_warmup_to_result(
-                result,
-                warmup_bars=warmup_bars,
-                warmup_start=signal_start_date,
-                requested_start=start_date,
-            )
+            result['logs'] = signals.get('logs', [])
             self._attach_actual_range_to_result(result, df_signal)
             logger.info("Backtest result formatted successfully")
         except Exception as e:
@@ -1901,6 +1896,7 @@ class BacktestService:
         ea['fillRule'] = 'next_bar_open'
         result['executionAssumptions'] = ea
         self._attach_actual_range_to_result(result, df)
+        result['logs'] = signals.get('logs', [])
         return result
     
     def run_code_strategy(
@@ -2139,7 +2135,7 @@ class BacktestService:
         if df_full.empty:
             raise ValueError("No candle data available in the backtest date range")
         
-        
+
         # 2. Execute indicator code to get signals (pass backtest params)
         backtest_params = {
             'leverage': leverage,
@@ -2587,8 +2583,10 @@ class BacktestService:
                     volume=float(row.get('volume') or 0),
                     timestamp=row.get('time')
                 )
-                on_bar(ctx, bar)
-
+                try:
+                    on_bar(ctx, bar)
+                except Exception as e:
+                    ctx.log(traceback.format_exc())
                 for order in ctx._orders:
                     action = str(order.get('action') or '').lower()
                     intent = str(order.get('intent') or 'auto').lower()
