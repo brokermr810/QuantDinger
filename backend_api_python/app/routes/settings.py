@@ -1922,10 +1922,11 @@ def get_settings_values():
         result[group_key] = {}
         for item in group['items']:
             key = item['key']
-            value = env_values.get(key, item.get('default', ''))
+            raw_value = env_values.get(key)
+            value = raw_value if raw_value is not None else item.get('default', '')
             if item['type'] == 'password':
                 result[group_key][key] = ''
-                result[group_key][f'{key}_configured'] = bool(value)
+                result[group_key][f'{key}_configured'] = bool(raw_value)
             else:
                 result[group_key][key] = value
     

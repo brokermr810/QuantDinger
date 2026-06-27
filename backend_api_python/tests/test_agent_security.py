@@ -27,25 +27,28 @@ def test_redact_secrets_masks_known_keys():
 
 def test_agent_audit_redact_masks_common_secret_keys():
     out = _redact({
+        "secret-key": "dash",
         "secret_key": "s",
         "secretKey": "camel",
         "passphrase": "p",
-        "nested": {"client_secret": "c"},
+        "nested": {"client-secret": "c"},
     })
+    assert out["secret-key"] == "<redacted>"
     assert out["secret_key"] == "<redacted>"
     assert out["secretKey"] == "<redacted>"
     assert out["passphrase"] == "<redacted>"
-    assert out["nested"]["client_secret"] == "<redacted>"
+    assert out["nested"]["client-secret"] == "<redacted>"
 
 
 def test_redact_strategy_row_covers_config_blocks():
     row = {
         "id": 1,
-        "exchange_config": {"apiKey": "k"},
+        "exchange_config": {"apiKey": "k", "secretKey": "s"},
         "notification_config": {"webhook_secret": "wh"},
     }
     out = redact_strategy_row(row)
     assert out["exchange_config"]["apiKey"] == "***"
+    assert out["exchange_config"]["secretKey"] == "***"
     assert out["notification_config"]["webhook_secret"] == "***"
 
 
