@@ -1,15 +1,15 @@
 ﻿"""
-Quick Trade API 鈥?manual / discretionary order placement.
+Quick Trade API - manual / discretionary order placement.
 
 Allows users to place market or limit orders directly from AI analysis
 or indicator analysis pages, without creating a strategy first.
 
 Endpoints:
-  POST /api/quick-trade/place-order      鈥?Place a quick order
-  POST /api/quick-trade/close-position    鈥?Close an existing position
-  GET  /api/quick-trade/balance          鈥?Get available balance
-  GET  /api/quick-trade/position          鈥?Get current position for symbol
-  GET  /api/quick-trade/history          鈥?Get quick trade history
+  POST /api/quick-trade/place-order      - Place a quick order
+  POST /api/quick-trade/close-position   - Close an existing position
+  GET  /api/quick-trade/balance          - Get available balance
+  GET  /api/quick-trade/position         - Get current position for symbol
+  GET  /api/quick-trade/history          - Get quick trade history
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ import re as _re
 
 _FRIENDLY_ERROR_PATTERNS = [
     # Insufficient balance / margin
-    (_re.compile(r"INSUFFICIENT[_ ]?AVAILABLE|insufficient.{0,20}(balance|margin|fund)|margin.{0,30}while available|not enough|璧勯噾涓嶈冻", _re.IGNORECASE),
+    (_re.compile(r"INSUFFICIENT[_ ]?AVAILABLE|insufficient.{0,20}(balance|margin|fund)|margin.{0,30}while available|not enough|资金不足", _re.IGNORECASE),
      "quickTrade.errorHints.insufficientBalance"),
     # Invalid size / quantity
     (_re.compile(
@@ -59,7 +59,7 @@ _FRIENDLY_ERROR_PATTERNS = [
     (_re.compile(r"timeout|timed? ?out|connect|ECONNREFUSED|SSL|ConnectionError|RemoteDisconnected", _re.IGNORECASE),
      "quickTrade.errorHints.networkError"),
     # Exchange maintenance
-    (_re.compile(r"maintenance|unavailable|system.{0,10}(busy|error|upgrade)|suspend|鏆傚仠", _re.IGNORECASE),
+    (_re.compile(r"maintenance|unavailable|system.{0,10}(busy|error|upgrade)|suspend|暂停", _re.IGNORECASE),
      "quickTrade.errorHints.exchangeMaintenance"),
 ]
 
@@ -151,7 +151,7 @@ def _merge_balance_leg_errors(
 quick_trade_blp = Blueprint('quick_trade', __name__)
 
 
-# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ helpers 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ---------- helpers ----------
 
 QUICK_TRADE_CRYPTO_EXCHANGES = {
     "binance",
@@ -275,7 +275,7 @@ def _convert_usdt_to_base_qty(client, symbol: str, usdt_amount: float, market_ty
                 except Exception:
                     pass
 
-            # Bybit v5 鈥?same host as trading API; tickers/orderbook are public
+            # Bybit v5 - same host as trading API; tickers/orderbook are public.
             from app.services.live_trading.bybit import BybitClient
             if current_price <= 0 and isinstance(client, BybitClient):
                 try:
@@ -416,7 +416,7 @@ def _try_enrich_fill(
     """Best-effort post-place ``wait_for_fill`` for a Quick Trade order.
 
     Quick Trade historically persisted whatever ``filled`` / ``avg_price`` the
-    ``place_market_order`` ACK returned 鈥?which on most exchanges is ``0`` and
+    ``place_market_order`` ACK returned, which on most exchanges is ``0`` and
     never carries the realised fee. This helper re-uses each client's
     ``wait_for_fill`` (the same one the strategy worker uses) to retrieve the
     real fill quantity, average price, and commission.
@@ -461,7 +461,7 @@ def _try_enrich_fill(
             )
         elif hasattr(client, "wait_for_fill"):
             # All other clients use a (order_id, max_wait_sec) signature;
-            # some also accept symbol 鈥?try the common shape first.
+            # Some also accept symbol; try the common shape first.
             try:
                 q = client.wait_for_fill(order_id=oid, max_wait_sec=max_wait_sec)
             except TypeError:
@@ -546,7 +546,7 @@ def _record_quick_trade(
         return None
 
 
-# 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€ endpoints 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# ---------- endpoints ----------
 
 @quick_trade_blp.route('/place-order', methods=['POST'])
 @login_required
@@ -555,19 +555,19 @@ def place_order():
     Place a quick market or limit order.
 
     Body JSON:
-      credential_id  (int)    鈥?saved exchange credential ID
-      symbol         (str)    鈥?e.g. "BTC/USDT"
-      side           (str)    鈥?"buy" or "sell"
-      order_type     (str)    鈥?"market" or "limit"  (default: market)
-      amount         (float)  鈥?USDT amount (always in USDT, will be converted to base qty)
-      price          (float)  鈥?limit price (required for limit orders)
-      leverage       (int)    鈥?leverage multiplier (default: 1)
+      credential_id  (int)    - saved exchange credential ID
+      symbol         (str)    - e.g. "BTC/USDT"
+      side           (str)    - "buy" or "sell"
+      order_type     (str)    - "market" or "limit"  (default: market)
+      amount         (float)  - USDT amount (always in USDT, will be converted to base qty)
+      price          (float)  - limit price (required for limit orders)
+      leverage       (int)    - leverage multiplier (default: 1)
                                 - leverage = 1: spot market
                                 - leverage > 1: swap (perpetual futures) market
-      market_type    (str)    鈥?"swap" / "spot" (optional, auto-determined by leverage if not provided)
-      tp_price       (float)  鈥?take-profit price (optional, for record only)
-      sl_price       (float)  鈥?stop-loss price (optional, for record only)
-      source         (str)    鈥?"ai_radar" / "ai_analysis" / "indicator" / "manual"
+      market_type    (str)    - "swap" / "spot" (optional, auto-determined by leverage if not provided)
+      tp_price       (float)  - take-profit price (optional, for record only)
+      sl_price       (float)  - stop-loss price (optional, for record only)
+      source         (str)    - "ai_radar" / "ai_analysis" / "indicator" / "manual"
     """
     try:
         user_id = g.user_id
@@ -1056,7 +1056,7 @@ def get_balance():
     """
     Get available balance from exchange.
 
-    Query: credential_id (int), market_type (str, default "swap") 鈥?active leg for ``available``/``total``.
+    Query: credential_id (int), market_type (str, default "swap") - active leg for ``available``/``total``.
 
     Response also includes ``swap`` and ``spot`` so the UI can show both account types.
     """
@@ -1182,7 +1182,7 @@ def _parse_balance(raw: Any, exchange_id: str, market_type: str) -> Dict[str, An
                         return result
                 return result
             ex = (exchange_id or "").lower()
-            # Gate.io USDT perpetual: GET /api/v4/futures/usdt/accounts 鈥?flat object (values often strings)
+            # Gate.io USDT perpetual: GET /api/v4/futures/usdt/accounts - flat object (values often strings).
             if ex == "gate" and mt0 != "spot":
                 gate_keys = (
                     "available", "total", "cross_available", "cross_margin_balance",
@@ -1209,7 +1209,7 @@ def _parse_balance(raw: Any, exchange_id: str, market_type: str) -> Dict[str, An
                         result["total"] = result["available"]
                     return result
             # Bitget mix: { code, data: [ { marginCoin, available, accountEquity, ... } ] }
-            # Must run before OKX 鈥?both use data as a list; OKX fallback would zero Bitget.
+            # Must run before OKX; both use data as a list and OKX fallback would zero Bitget.
             if ex == "bitget" and (market_type or "").lower() != "spot":
                 bg_data = raw.get("data")
                 if isinstance(bg_data, list) and bg_data:
@@ -1256,7 +1256,7 @@ def _parse_balance(raw: Any, exchange_id: str, market_type: str) -> Dict[str, An
                             result["available"] = float(d.get("availBal") or d.get("availEq") or 0)
                             result["total"] = float(d.get("eq") or d.get("cashBal") or 0)
                             return result
-                # OKX-style single-account row (not Bitget 鈥?Bitget handled above)
+                # OKX-style single-account row. Bitget is handled above.
                 if "availBal" in first or "availEq" in first or "totalEq" in first or "adjEq" in first:
                     result["available"] = float(
                         first.get("availBal") or first.get("availEq") or first.get("adjEq") or first.get("totalEq") or 0
@@ -1603,7 +1603,7 @@ def _fetch_exchange_positions_raw(
                 base_amt = client.contracts_signed_to_base_qty(contract=c, contracts_signed=ct_sz)
                 if base_amt > 0:
                     q["positionAmt"] = base_amt
-                    # Preserve direction for _parse_positions 鈥?Gate encodes short as
+                    # Preserve direction for _parse_positions. Gate encodes short as
                     # negative contract size but positionAmt is always positive.
                     q["positionSide"] = "LONG" if ct_sz > 0 else "SHORT"
             out.append(q)
@@ -1801,7 +1801,7 @@ def _parse_positions(raw: Any) -> list:
                         if len(parts) == 2 and parts[0] and parts[1]:
                             display_symbol = f"{parts[0]}/{parts[1]}"
                         break
-            # For OKX, pos is signed in net_mode 鈥?read before abs-only aliases.
+            # For OKX, pos is signed in net_mode. Read before abs-only aliases.
             size = _extract_signed_position_qty(item)
             psu = str(item.get("positionSide") or item.get("position_side") or "").strip().upper()
             if psu in ("LONG", "SHORT"):
@@ -1910,13 +1910,13 @@ def close_position():
     Close an existing position.
     
     Body JSON:
-      credential_id  (int)    鈥?saved exchange credential ID
-      symbol         (str)    鈥?e.g. "BTC/USDT"
-      market_type    (str)    鈥?"swap" / "spot" (default: swap)
-      size            (float)  鈥?position size to close (optional, defaults to full position)
-      close_scope    (str)    鈥?"full" (default) or "system_tracked" (swap only: min(position, net from qd_quick_trades))
-      position_side  (str)    鈥?optional "long" / "short"; required when both directions exist for the same symbol
-      source          (str)    鈥?"ai_radar" / "ai_analysis" / "indicator" / "manual"
+      credential_id  (int)    - saved exchange credential ID
+      symbol         (str)    - e.g. "BTC/USDT"
+      market_type    (str)    - "swap" / "spot" (default: swap)
+      size           (float)  - position size to close (optional, defaults to full position)
+      close_scope    (str)    - "full" (default) or "system_tracked" (swap only: min(position, net from qd_quick_trades))
+      position_side  (str)    - optional "long" / "short"; required when both directions exist for the same symbol
+      source         (str)    - "ai_radar" / "ai_analysis" / "indicator" / "manual"
     """
     try:
         user_id = g.user_id
@@ -2107,7 +2107,7 @@ def close_position():
         raw = getattr(result, "raw", {}) or {}
 
         # ---- best-effort post-place enrichment (fee + accurate filled/avg) ----
-        # See the matching block in /place-order 鈥?close-position orders need
+        # See the matching block in /place-order; close-position orders need
         # the same wait_for_fill pass so the resulting Quick Trade row carries
         # the realised commission.
         commission = 0.0

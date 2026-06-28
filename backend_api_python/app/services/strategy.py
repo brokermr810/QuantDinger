@@ -1075,7 +1075,7 @@ class StrategyService:
 
         # Validate broker / market / market_type / direction / bot_type as a
         # single unit through the centralized policy (broker_market_policy.py).
-        # That module is the single source of truth 鈥?adding a new broker or
+        # That module is the single source of truth; adding a new broker or
         # tightening a rule should only need a change in one place.
         from app.services.broker_market_policy import validate_strategy_config
         exchange_id = (resolved_ex_cfg.get('exchange_id') or '').strip().lower() if isinstance(resolved_ex_cfg, dict) else ''
@@ -1095,7 +1095,7 @@ class StrategyService:
             )
 
         # When credential_id is present, strip raw API keys to avoid
-        # storing secrets in the strategy record 鈥?they live in qd_exchange_credentials.
+        # storing secrets in the strategy record. They live in qd_exchange_credentials.
         if isinstance(exchange_config, dict) and exchange_config.get('credential_id'):
             for _secret_key in ('api_key', 'secret_key', 'passphrase', 'apiKey', 'secret', 'password'):
                 exchange_config.pop(_secret_key, None)
@@ -1112,7 +1112,7 @@ class StrategyService:
         # underlying pair. Equity / FX / futures markets pass through
         # unchanged. Write the normalised value back into trading_config so
         # the JSON copy stored alongside the denormalised column also reflects
-        # the canonical form 鈥?the live trading worker and execution layer
+        # the canonical form. The live trading worker and execution layer
         # both read symbol from trading_config['symbol'].
         if market_category == 'Crypto' and isinstance(symbol, str) and symbol:
             symbol = normalize_crypto_symbol(symbol)
@@ -1457,7 +1457,7 @@ class StrategyService:
         trading_config = self._sanitize_grid_trading_config(trading_config)
 
         # When credential_id is present, strip raw API keys to avoid
-        # storing secrets in the strategy record 鈥?they live in qd_exchange_credentials.
+        # storing secrets in the strategy record. They live in qd_exchange_credentials.
         if isinstance(exchange_config, dict) and exchange_config.get('credential_id'):
             for _secret_key in ('api_key', 'secret_key', 'passphrase', 'apiKey', 'secret', 'password'):
                 exchange_config.pop(_secret_key, None)
