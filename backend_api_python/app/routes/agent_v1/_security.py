@@ -6,9 +6,9 @@ from typing import Any, Mapping, MutableMapping
 # Upper bound for indicator Python source accepted via agent/MCP paths.
 MAX_INDICATOR_CODE_BYTES = 512 * 1024
 
-# Keys stripped or masked anywhere in agent-facing JSON (case-sensitive).
+# Keys stripped or masked anywhere in agent-facing JSON.
 _SECRET_KEYS = frozenset({
-    "api_key", "secret_key", "passphrase", "apiKey", "secret", "password",
+    "apikey", "api_key", "secretkey", "secret_key", "passphrase", "secret", "password",
     "private_key", "access_token", "refresh_token", "bot_token",
     "webhook_secret", "signing_secret", "client_secret",
 })
@@ -33,7 +33,7 @@ def redact_secrets(value: Any, *, depth: int = 0, max_depth: int = 6) -> Any:
         out: dict[str, Any] = {}
         for k, v in value.items():
             key = str(k)
-            if key in _SECRET_KEYS and v not in (None, "", False):
+            if key.replace("-", "_").lower() in _SECRET_KEYS and v not in (None, "", False):
                 out[key] = "***"
             elif isinstance(v, Mapping):
                 out[key] = redact_secrets(v, depth=depth + 1, max_depth=max_depth)
