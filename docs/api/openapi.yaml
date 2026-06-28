@@ -173,6 +173,8 @@ tags:
   description: Indicator backtesting (Public)
 - name: Strategy
   description: Strategy runtime and bots (Internal)
+- name: Account
+  description: Trading account snapshots and positions (Internal)
 - name: Community
   description: Indicator marketplace (Public)
 - name: Credentials
@@ -2501,7 +2503,7 @@ paths:
                 $ref: '#/components/schemas/HumanSuccessEnvelope'
       summary: Live swap/spot positions + open orders for a saved credential.
       tags:
-      - strategy
+      - Account
       operationId: getApiAccountSnapshot
       x-visibility: internal
   /api/account/positions:
@@ -2521,7 +2523,7 @@ paths:
                 $ref: '#/components/schemas/HumanSuccessEnvelope'
       summary: L1 account position mirror for Quick Trade / asset views.
       tags:
-      - strategy
+      - Account
       operationId: getApiAccountPositions
       x-visibility: internal
   /api/strategies/backtest:

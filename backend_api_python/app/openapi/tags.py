@@ -8,6 +8,7 @@ MARKET = "Market"
 INDICATOR = "Indicator"
 BACKTEST = "Backtest"
 STRATEGY = "Strategy"
+ACCOUNT = "Account"
 COMMUNITY = "Community"
 CREDENTIALS = "Credentials"
 DASHBOARD = "Dashboard"
@@ -31,6 +32,7 @@ ALL_TAGS = [
     {"name": INDICATOR, "description": "Indicator IDE workspace (Public)"},
     {"name": BACKTEST, "description": "Indicator backtesting (Public)"},
     {"name": STRATEGY, "description": "Strategy runtime and bots (Internal)"},
+    {"name": ACCOUNT, "description": "Trading account snapshots and positions (Internal)"},
     {"name": COMMUNITY, "description": "Indicator marketplace (Public)"},
     {"name": CREDENTIALS, "description": "Exchange credential vault (Internal)"},
     {"name": DASHBOARD, "description": "Dashboard aggregates (Internal)"},
