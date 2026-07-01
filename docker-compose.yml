@@ -95,6 +95,10 @@ services:
         GIT_TAG: ${GIT_TAG:-${IMAGE_TAG:-}}
     container_name: quantdinger-backend
     restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
     depends_on:
       postgres:
         condition: service_healthy
@@ -127,6 +131,8 @@ services:
       # Route-level executor tuning (each worker may use one DB connection).
       - MARKET_EXECUTOR_WORKERS=${MARKET_EXECUTOR_WORKERS:-6}
       - PORTFOLIO_EXECUTOR_WORKERS=${PORTFOLIO_EXECUTOR_WORKERS:-3}
+      - RESOURCE_FD_COOLDOWN_SEC=${RESOURCE_FD_COOLDOWN_SEC:-180}
+      - PORTFOLIO_MONITOR_DUE_BATCH_LIMIT=${PORTFOLIO_MONITOR_DUE_BATCH_LIMIT:-5}
       # Gunicorn concurrency (threads within the single worker process).
       - GUNICORN_WORKERS=${GUNICORN_WORKERS:-1}
       - GUNICORN_THREADS=${GUNICORN_THREADS:-8}

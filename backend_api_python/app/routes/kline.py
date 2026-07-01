@@ -17,6 +17,49 @@ kline_blp = Blueprint('kline', __name__)
 kline_service = KlineService()
 
 
+def _latest_kline_ttl(timeframe: str) -> int:
+    tf = (timeframe or '').strip()
+    return {
+        '1m': 3,
+        '3m': 4,
+        '5m': 5,
+        '15m': 8,
+        '30m': 10,
+        '1H': 10,
+        '4H': 15,
+        '1D': 30,
+        '1W': 60,
+        '1h': 10,
+        '4h': 15,
+        '1d': 30,
+        '1w': 60,
+    }.get(tf, 10)
+
+
+def _guard_policy(timeframe: str, limit: int, before_time):
+    if before_time:
+        return {
+            'ttl_sec': 300,
+            'stale_ttl_sec': 1800,
+            'timeout_sec': 25,
+            'max_concurrent': 6,
+        }
+    ttl = _latest_kline_ttl(timeframe)
+    if limit <= 10:
+        return {
+            'ttl_sec': ttl,
+            'stale_ttl_sec': max(20, ttl * 4),
+            'timeout_sec': 8,
+            'max_concurrent': 10,
+        }
+    return {
+        'ttl_sec': ttl,
+        'stale_ttl_sec': max(60, ttl * 6),
+        'timeout_sec': 25,
+        'max_concurrent': 10,
+    }
+
+
 @kline_blp.route('/kline', methods=['GET'])
 def get_kline():
     """
@@ -53,6 +96,7 @@ def get_kline():
         
         logger.info(f"Requesting K-lines: {market}:{symbol}, timeframe={timeframe}, limit={limit}")
         
+        policy = _guard_policy(timeframe, limit, before_time)
         klines = guarded_cached(
             cache_key("indicator_kline", market, symbol, timeframe, limit, before_time or ""),
             lambda: kline_service.get_kline(
@@ -62,11 +106,11 @@ def get_kline():
                 limit=limit,
                 before_time=before_time
             ),
-            ttl_sec=30,
-            stale_ttl_sec=180,
-            timeout_sec=10,
+            ttl_sec=policy['ttl_sec'],
+            stale_ttl_sec=policy['stale_ttl_sec'],
+            timeout_sec=policy['timeout_sec'],
             namespace="indicator_kline",
-            max_concurrent=8,
+            max_concurrent=policy['max_concurrent'],
         )
         
         if not klines:

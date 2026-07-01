@@ -58,17 +58,19 @@ class MetaCacheConfig(type):
     @property
     def KLINE_CACHE_TTL(cls):
         return {
-            '1m': 5,       # Cache 1m K-lines for 5 seconds
-            '3m': 30,      # Cache 3m K-lines for 30 seconds
-            '5m': 60,      # Cache 5m K-lines for 1 minute
-            '15m': 300,    # Cache 15m K-lines for 5 minutes
-            '30m': 300,    # Cache 30m K-lines for 5 minutes
-            '1H': 300,     # Cache 1H K-lines for 5 minutes
-            '4H': 300,     # Cache 4H K-lines for 5 minutes
-            '1D': 300,     # Cache 1D K-lines for 5 minutes
-            '1h': 300,
-            '4h': 300,
-            '1d': 300,
+            '1m': 3,
+            '3m': 4,
+            '5m': 5,
+            '15m': 8,
+            '30m': 10,
+            '1H': 10,
+            '4H': 15,
+            '1D': 30,
+            '1W': 60,
+            '1h': 10,
+            '4h': 15,
+            '1d': 30,
+            '1w': 60,
         }
 
     @property

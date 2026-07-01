@@ -17,6 +17,7 @@ import requests
 
 from app.data_sources.rate_limiter import get_request_headers, retry_with_backoff, get_tencent_limiter
 from app.utils.logger import get_logger
+from app.utils.resource_guard import assert_fd_available
 
 logger = get_logger(__name__)
 
@@ -78,6 +79,7 @@ def fetch_quote(code: str, timeout: int = 8) -> Optional[List[str]]:
     c = _lower_code(code)
     if not c:
         return None
+    assert_fd_available("Tencent quote")
 
     limiter = get_tencent_limiter()
     limiter.wait()
@@ -203,6 +205,7 @@ def fetch_kline(code: str, period: str, count: int = 300, adj: str = "qfq", time
     c = _lower_code(code)
     if not c:
         return []
+    assert_fd_available("Tencent K-line")
 
     limiter = get_tencent_limiter()
     limiter.wait()

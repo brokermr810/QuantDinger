@@ -26,6 +26,7 @@ import pandas as pd
 import requests
 
 from app.utils.logger import get_logger
+from app.utils.resource_guard import ResourceExhaustedError, assert_fd_available, record_exception
 
 logger = get_logger(__name__)
 
@@ -212,6 +213,12 @@ def fetch_twelvedata_klines(
     before_time: Optional[int],
 ) -> List[Dict[str, Any]]:
     """Fetch K-lines from Twelve Data REST API. Requires TWELVE_DATA_API_KEY."""
+    try:
+        assert_fd_available("TwelveData K-line")
+    except ResourceExhaustedError as e:
+        logger.warning(str(e))
+        return []
+
     api_key = _get_twelve_data_api_key()
     if not api_key:
         return []
@@ -245,6 +252,11 @@ def fetch_twelvedata_klines(
             data = resp.json()
             break
         except Exception as e:
+            try:
+                record_exception(e, scope="TwelveData K-line")
+            except ResourceExhaustedError as guarded:
+                logger.warning(str(guarded))
+                return []
             if attempt + 1 < _MAX_ATTEMPTS and _is_transient(e):
                 delay = min(_BACKOFF_CAP_SEC, _BACKOFF_BASE_SEC * (2 ** attempt))
                 logger.debug(
@@ -413,6 +425,12 @@ def fetch_yfinance_klines(
 ) -> List[Dict[str, Any]]:
     """Fetch K-lines via yfinance for CN/HK stocks. Globally accessible, no API key needed."""
     try:
+        assert_fd_available("yfinance K-line")
+    except ResourceExhaustedError as e:
+        logger.warning(str(e))
+        return []
+
+    try:
         import yfinance as yf
     except ImportError:
         logger.debug("yfinance not installed; skipping yfinance K-lines")
@@ -442,6 +460,11 @@ def fetch_yfinance_klines(
             )
             break
         except Exception as e:
+            try:
+                record_exception(e, scope="yfinance K-line")
+            except ResourceExhaustedError as guarded:
+                logger.warning(str(guarded))
+                return []
             if attempt + 1 < _MAX_ATTEMPTS and _is_transient(e):
                 delay = min(_BACKOFF_CAP_SEC, _BACKOFF_BASE_SEC * (2 ** attempt))
                 logger.debug(
@@ -542,6 +565,12 @@ def fetch_akshare_minute_klines(
     limit: int,
     before_time: Optional[int],
 ) -> List[Dict[str, Any]]:
+    try:
+        assert_fd_available("AkShare minute K-line")
+    except ResourceExhaustedError as e:
+        logger.warning(str(e))
+        return []
+
     p = _minute_period_str(timeframe)
     if p is None:
         return []
@@ -565,6 +594,11 @@ def fetch_akshare_minute_klines(
                     df = ak.stock_zh_a_hist_min_em(symbol=sym, start_date=sd, end_date=ed, period=p, adjust=adj)
             break
         except Exception as e:
+            try:
+                record_exception(e, scope="AkShare minute K-line")
+            except ResourceExhaustedError as guarded:
+                logger.warning(str(guarded))
+                return []
             if attempt + 1 < _MAX_ATTEMPTS and _is_transient(e):
                 delay = min(_BACKOFF_CAP_SEC, _BACKOFF_BASE_SEC * (2 ** attempt))
                 logger.debug(
@@ -591,6 +625,12 @@ def fetch_akshare_weekly_klines(
     before_time: Optional[int],
 ) -> List[Dict[str, Any]]:
     try:
+        assert_fd_available("AkShare weekly K-line")
+    except ResourceExhaustedError as e:
+        logger.warning(str(e))
+        return []
+
+    try:
         import akshare as ak  # type: ignore
     except ImportError:
         return []
@@ -611,6 +651,11 @@ def fetch_akshare_weekly_klines(
                     df = ak.stock_zh_a_hist(symbol=sym, period="weekly", start_date=start_s, end_date=end_s, adjust="qfq")
             break
         except Exception as e:
+            try:
+                record_exception(e, scope="AkShare weekly K-line")
+            except ResourceExhaustedError as guarded:
+                logger.warning(str(guarded))
+                return []
             if attempt + 1 < _MAX_ATTEMPTS and _is_transient(e):
                 delay = min(_BACKOFF_CAP_SEC, _BACKOFF_BASE_SEC * (2 ** attempt))
                 logger.debug(

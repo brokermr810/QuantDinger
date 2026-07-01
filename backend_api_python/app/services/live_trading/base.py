@@ -17,6 +17,13 @@ from typing import Any, Dict, Optional, Tuple, Union
 
 import requests
 
+from app.utils.resource_guard import (
+    ResourceExhaustedError,
+    assert_fd_available,
+    is_fd_exhaustion,
+    mark_fd_exhausted,
+)
+
 logger = logging.getLogger(__name__)
 
 # Cached SSL verify setting for all live-trading REST calls (requests + SOCKS proxy).
@@ -98,16 +105,7 @@ def is_file_descriptor_exhausted(exc: BaseException | str) -> bool:
         text = exc.lower()
         return "too many open files" in text or "errno 24" in text
 
-    seen = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if isinstance(current, OSError) and getattr(current, "errno", None) == 24:
-            return True
-        if is_file_descriptor_exhausted(str(current)):
-            return True
-        current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
-    return False
+    return is_fd_exhaustion(exc)
 
 
 class BaseRestClient:
@@ -133,6 +131,7 @@ class BaseRestClient:
     ) -> Tuple[int, Dict[str, Any], str]:
         url = self._url(path)
         try:
+            assert_fd_available("exchange REST")
             request_headers = dict(headers or {})
             request_headers.setdefault("Connection", "close")
             with requests.request(
@@ -164,6 +163,7 @@ class BaseRestClient:
             )
         except requests.exceptions.SSLError as e:
             if is_file_descriptor_exhausted(e):
+                mark_fd_exhausted(e)
                 raise LiveTradingError(f"Resource exhausted: too many open files while calling exchange REST: {e}") from e
             logger.warning(
                 "Exchange HTTPS TLS verify failed (%s). Same setting applies to all REST exchanges (Gate, HTX/hbdm, etc.). "
@@ -175,8 +175,11 @@ class BaseRestClient:
             raise
         except requests.exceptions.RequestException as e:
             if is_file_descriptor_exhausted(e):
+                mark_fd_exhausted(e)
                 raise LiveTradingError(f"Resource exhausted: too many open files while calling exchange REST: {e}") from e
             raise
+        except ResourceExhaustedError as e:
+            raise LiveTradingError(f"Resource exhausted: too many open files while calling exchange REST: {e}") from e
 
     @staticmethod
     def _now_ms() -> int:

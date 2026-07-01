@@ -10,6 +10,12 @@ from typing import Dict, List, Any, Optional
 from app.data_sources.base import BaseDataSource
 from app.data_sources.errors import UnsupportedMarketError
 from app.utils.logger import get_logger
+from app.utils.resource_guard import (
+    ResourceExhaustedError,
+    assert_fd_available,
+    is_fd_exhaustion,
+    mark_fd_exhausted,
+)
 
 logger = get_logger(__name__)
 
@@ -233,13 +239,26 @@ class DataSourceFactory:
         """
         m = cls.normalize_market(market or "")
         try:
+            assert_fd_available(f"market-data kline {m}:{symbol}")
             source = cls._resolve_source(m, exchange_id=exchange_id, market_type=market_type)
             klines = source.get_kline(symbol, timeframe, limit, before_time, after_time)
             
             klines.sort(key=lambda x: x['time'])
             
             return klines
+        except ResourceExhaustedError as e:
+            cls._log_limited(
+                "error",
+                f"fd-cooldown:kline:{m}:{symbol}",
+                "Skipped K-lines %s:%s because resource guard is active: %s",
+                market,
+                symbol,
+                str(e),
+            )
+            return []
         except Exception as e:
+            if is_fd_exhaustion(e):
+                mark_fd_exhausted(e)
             cls._log_limited(
                 "error",
                 f"kline:{m}:{symbol}:{type(e).__name__}:{str(e)[:160]}",
@@ -291,8 +310,19 @@ class DataSourceFactory:
         """
         m = cls.normalize_market(market or "")
         try:
+            assert_fd_available(f"market-data ticker {m}:{symbol}")
             source = cls._resolve_source(m, exchange_id=exchange_id, market_type=market_type)
             return source.get_ticker(symbol)
+        except ResourceExhaustedError as e:
+            cls._log_limited(
+                "error",
+                f"fd-cooldown:ticker:{m}:{symbol}",
+                "Skipped ticker %s:%s because resource guard is active: %s",
+                market,
+                symbol,
+                str(e),
+            )
+            return {'last': 0, 'symbol': symbol}
         except NotImplementedError:
             cls._log_limited(
                 "warning",
@@ -302,6 +332,8 @@ class DataSourceFactory:
             )
             return {'last': 0, 'symbol': symbol}
         except Exception as e:
+            if is_fd_exhaustion(e):
+                mark_fd_exhausted(e)
             cls._log_limited(
                 "error",
                 f"ticker:{m}:{symbol}:{type(e).__name__}:{str(e)[:160]}",

@@ -9,21 +9,18 @@ import time
 from functools import wraps
 from typing import Any, Callable, Optional, Tuple, Type
 
+from app.utils.resource_guard import (
+    is_fd_exhaustion,
+    mark_fd_exhausted,
+    ResourceExhaustedError,
+)
+
 logger = logging.getLogger(__name__)
 
 
 def _is_too_many_open_files(exc: BaseException) -> bool:
     """Return True when an exception chain indicates process FD exhaustion."""
-    seen = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if isinstance(current, OSError) and getattr(current, "errno", None) == 24:
-            return True
-        if "too many open files" in str(current).lower():
-            return True
-        current = getattr(current, "__cause__", None) or getattr(current, "__context__", None)
-    return False
+    return is_fd_exhaustion(exc)
 
 
 USER_AGENTS = [
@@ -134,12 +131,15 @@ def retry_with_backoff(
                     last_exception = exc
 
                     if _is_too_many_open_files(exc):
+                        mark_fd_exhausted(exc)
                         logger.error(
                             "[retry] %s aborted: process file descriptors are exhausted: %s",
                             func.__name__,
                             exc,
                         )
-                        raise
+                        raise ResourceExhaustedError(
+                            f"{func.__name__} aborted: process file descriptors exhausted"
+                        ) from exc
 
                     if attempt >= max_attempts:
                         logger.error(

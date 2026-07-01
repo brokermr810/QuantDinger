@@ -20,6 +20,12 @@ def reload_runtime_env() -> None:
     # Load root first, then backend .env to keep backend file higher priority.
     load_dotenv(os.path.join(root_dir, ".env"), override=True)
     load_dotenv(os.path.join(BACKEND_DIR, ".env"), override=True)
+    try:
+        registry = importlib.import_module("app.markets.registry")
+        if hasattr(registry, "clear_runtime_env_cache"):
+            registry.clear_runtime_env_cache()
+    except Exception as exc:
+        logger.warning("clear_runtime_env_cache skipped: %s", exc)
 
 
 def refresh_runtime_services() -> None:

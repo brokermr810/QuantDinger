@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import threading
 import time
 import traceback
@@ -21,6 +22,7 @@ from app.services.billing_service import get_billing_service
 from app.services.portfolio_monitor_i18n import get_alert_message, get_alert_title
 from app.services.portfolio_monitor_notifications import resolve_notification_delivery
 from app.utils.json_helpers import safe_json_loads
+from app.utils.resource_guard import is_fd_cooldown_active, fd_cooldown_remaining
 
 logger = get_logger(__name__)
 
@@ -30,6 +32,13 @@ _monitor_thread: Optional[threading.Thread] = None
 _stop_event = threading.Event()
 
 MAX_ALERTS_PER_MONITOR_TICK = 300
+
+
+def _due_monitor_batch_limit() -> int:
+    try:
+        return max(1, min(20, int(os.getenv("PORTFOLIO_MONITOR_DUE_BATCH_LIMIT", "5"))))
+    except Exception:
+        return 5
 
 
 
@@ -1543,17 +1552,27 @@ def _monitor_loop():
 
     while not _stop_event.is_set():
         try:
+            if is_fd_cooldown_active():
+                logger.warning(
+                    "Portfolio monitor tick skipped: FD cooldown active for %.0fs",
+                    fd_cooldown_remaining(),
+                )
+                _stop_event.wait(min(30, max(1, int(fd_cooldown_remaining()))))
+                continue
+
             _check_position_alerts()
 
             with get_db_connection() as db:
                 cur = db.cursor()
+                batch_limit = _due_monitor_batch_limit()
                 cur.execute(
                     """
                     SELECT id, user_id FROM qd_position_monitors
                     WHERE is_active = 1 AND next_run_at <= NOW()
                     ORDER BY next_run_at ASC
-                    LIMIT 20
-                    """
+                    LIMIT ?
+                    """,
+                    (batch_limit,),
                 )
                 rows = cur.fetchall() or []
                 cur.close()
