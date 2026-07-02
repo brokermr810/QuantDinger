@@ -49,3 +49,14 @@ def test_swap_integer_lot_sz_precision_zero():
     )
     assert precision == 0
     assert c._dec_str(sz, strict_precision=precision) == "5"
+
+
+def test_positive_exponent_lot_sz_clamps_to_zero_precision():
+    # lotSz=10 normalizes to 1E+1 (positive exponent); max(0, -exp) must
+    # clamp precision to 0 rather than going negative.
+    c = _client_with_instrument("X-USDT", "SPOT", "10", "10")
+    sz, precision = c._normalize_order_size(
+        inst_id="X-USDT", market_type="spot", size=25.0
+    )
+    assert precision == 0
+    assert c._dec_str(sz, strict_precision=precision) == "20"
