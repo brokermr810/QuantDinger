@@ -62,8 +62,7 @@ def validate_indicator_code(code: str, user_params: Dict[str, Any] | None = None
         "params": merged_params,
         "output": None,
     }
-    # Match the backtest execution contract exposed to agents: OHLCV series are
-    # available as convenience globals in addition to df columns.
+    # OHLCV series are available as convenience globals in addition to df columns.
     for col in ("open", "high", "low", "close", "volume"):
         exec_env[col] = exec_env["df"][col]
     exec_env["__builtins__"] = build_safe_builtins()
@@ -145,23 +144,9 @@ def validate_indicator_code(code: str, user_params: Dict[str, Any] | None = None
                 hints,
             )
 
-    executed_df = exec_env.get("df", df)
-    four_way_cols = ["open_long", "close_long", "open_short", "close_short"]
-    has_four_way = all(col in getattr(executed_df, "columns", []) for col in four_way_cols)
-    if not has_four_way:
-        return _validation_error(
-            "MissingExecutionColumns",
-            "Missing execution columns. New QuantDinger indicator scripts must define "
-            "df['open_long'], df['close_long'], df['open_short'], and df['close_short'] "
-            "as boolean columns. output['signals'] is chart-only and cannot place orders.",
-            plots,
-            signals,
-            hints,
-        )
-
     return {
         "success": True,
-        "msg": "Verification passed! Code executed successfully.",
+        "msg": "Verification passed. Indicator code rendered successfully.",
         "error_type": None,
         "details": None,
         "plots_count": len(plots),

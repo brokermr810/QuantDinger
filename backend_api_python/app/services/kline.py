@@ -171,7 +171,14 @@ class KlineService:
             logger.debug(f"1m kline failed for {market}:{symbol}, trying daily: {e}")
         
         try:
-            klines = self.get_kline(market, symbol, '1D', 2)
+            klines = self.get_kline(
+                market,
+                symbol,
+                '1D',
+                2,
+                exchange_id=exchange_id,
+                market_type=market_type,
+            )
             if klines and len(klines) > 0:
                 latest = klines[-1]
                 prev_close = klines[-2]['close'] if len(klines) > 1 else latest.get('open', 0)

@@ -299,14 +299,14 @@ def build_sql(rows: List[Row], notes: List[str]) -> str:
     ]
     for note in notes:
         out.append(f"-- {note}")
-    out.extend(["", "INSERT INTO qd_market_symbols (market, symbol, name, exchange, currency, is_active, is_hot, sort_order) VALUES"])
+    out.extend(["", "INSERT INTO qd_market_symbols (market, symbol, name, exchange, currency, market_type, instrument_id, is_active, is_hot, sort_order) VALUES"])
     values = [
-        "  (" + ", ".join([sql_quote(a), sql_quote(b), sql_quote(c), sql_quote(d), sql_quote(e), "1", "0", "0"]) + ")"
+        "  (" + ", ".join([sql_quote(a), sql_quote(b), sql_quote(c), sql_quote(d), sql_quote(e), "'spot'", "''", "1", "0", "0"]) + ")"
         for a, b, c, d, e in rows
     ]
     out.append(",\n".join(values))
     out.extend([
-        "ON CONFLICT (market, symbol) DO UPDATE",
+        "ON CONFLICT (market, symbol, exchange, market_type, instrument_id) DO UPDATE",
         "  SET name = EXCLUDED.name,",
         "      exchange = COALESCE(NULLIF(EXCLUDED.exchange, ''), qd_market_symbols.exchange),",
         "      currency = COALESCE(NULLIF(EXCLUDED.currency, ''), qd_market_symbols.currency),",

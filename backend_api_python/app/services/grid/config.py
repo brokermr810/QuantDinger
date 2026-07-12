@@ -52,6 +52,9 @@ class GridBotConfig:
     leverage: float
     market_type: str
     margin_mode: str
+    max_open_orders: int = 999999
+    min_spread_between_orders: float = 0.0
+    order_frequency: int = 0
 
     @classmethod
     def from_trading_config(cls, trading_config: Dict[str, Any]) -> "GridBotConfig":
@@ -84,6 +87,12 @@ class GridBotConfig:
             leverage=max(1.0, _float(tc.get("leverage"), 1.0)),
             market_type=mt,
             margin_mode=str(tc.get("margin_mode") or tc.get("marginMode") or "cross").strip().lower(),
+            max_open_orders=max(1, _int(bp.get("maxOpenOrders") or bp.get("max_open_orders"), 999999)),
+            min_spread_between_orders=_pct(
+                bp.get("minSpreadBetweenOrders") or bp.get("min_spread_between_orders"),
+                0.0,
+            ),
+            order_frequency=max(0, _int(bp.get("orderFrequency") or bp.get("order_frequency"), 0)),
         )
 
     def effective_bounds(self, runtime_params: Optional[Dict[str, Any]] = None) -> tuple[float, float]:

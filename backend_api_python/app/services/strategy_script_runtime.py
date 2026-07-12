@@ -1,8 +1,11 @@
-"""
-Python 策略脚本（on_init / on_bar + ctx.buy/sell/close_position）运行时。
-与回测逻辑对齐，供 TradingExecutor 实盘逐根 K 线调用。
-"""
+"""Python ScriptStrategy runtime shared by backtests and live execution."""
 from __future__ import annotations
+
+# ScriptStrategy production contract:
+# - implement on_init(ctx) and on_bar(ctx, bar)
+# - declare strategy/risk parameters with ctx.param(...)
+# - emit explicit intents: open_long/add_long/reduce_long/close_long/open_short/add_short/reduce_short/close_short
+# - multi-entry scripts must call add_long/add_short after the first open intent
 
 import os
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -10,6 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from app.services.strategy_runtime.signals import StrategySignal
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -178,6 +182,12 @@ class ScriptPosition(dict):
     def is_flat(self) -> bool:
         return not self.has_long() and not self.has_short()
 
+    def is_long(self) -> bool:
+        return self.has_long() and not self.has_short()
+
+    def is_short(self) -> bool:
+        return self.has_short() and not self.has_long()
+
     def open_long(self, entry_price: float, amount: float) -> None:
         amt = max(0.0, float(amount or 0.0))
         if amt <= 0:
@@ -283,7 +293,7 @@ class ScriptPosition(dict):
     def open_position(self, side: str, entry_price: float, amount: float) -> None:
         """Legacy single-leg open. Routes to the matching hedge leg.
 
-        Resets the *target* leg only — does not touch the opposite leg, so a
+        Resets the *target* leg only; it does not touch the opposite leg, so a
         neutral-grid script can ``open_position('long', ...)`` while still
         holding a short leg from a previous bar.
         """
@@ -343,9 +353,22 @@ class StrategyScriptContext:
         self._max_logs_per_flush = _env_int("STRATEGY_SCRIPT_MAX_LOGS_PER_FLUSH", 50, 0)
         self._max_log_chars = _env_int("STRATEGY_SCRIPT_MAX_LOG_CHARS", 500, 1)
         self.current_index = -1
+        self.current_dt = None
+        self.is_warming_up = False
+        self.is_ready = True
+        self.startup_candle_count = 0
+        self.warmup_bars_seen = 0
         self.position = ScriptPosition()
+        self.positions: Dict[str, Dict[str, Any]] = {
+            "long": {"side": "long", "size": 0.0, "entry_price": 0.0},
+            "short": {"side": "short", "size": 0.0, "entry_price": 0.0},
+        }
         self.balance = float(initial_balance)
         self.equity = float(initial_balance)
+        self.initial_capital = float(initial_balance)
+        self.available_cash = float(initial_balance)
+        self.available_capital = float(initial_balance)
+        self.available_margin = float(initial_balance)
         self.strategy_id = int(strategy_id or 0)
         self.strategy_run_id = int(strategy_run_id or 0)
         self.symbol = str(symbol or "")
@@ -359,6 +382,9 @@ class StrategyScriptContext:
         self.timeframe = "1m"
         self.tick_interval_sec = 10
         self.set_runtime_config({}, initial_balance=initial_balance)
+        from app.services.ai_decision import UnavailableAIDecisionClient
+
+        self.ai = UnavailableAIDecisionClient()
         self._bind_runtime_state()
 
     def _bind_runtime_state(self) -> None:
@@ -451,6 +477,10 @@ class StrategyScriptContext:
         self.market_type = market_type
         self.leverage = leverage
         self.investment_amount = investment_amount
+        self.initial_capital = investment_amount
+        self.available_cash = float(self.balance)
+        self.available_capital = investment_amount
+        self.available_margin = investment_amount
         self.timeframe = timeframe
         self.tick_interval_sec = tick_interval_sec
         self.runtime = {
@@ -461,15 +491,25 @@ class StrategyScriptContext:
             "market_type": market_type,
             "leverage": leverage,
             "investment_amount": investment_amount,
+            "available_cash": self.available_cash,
+            "available_capital": self.available_capital,
+            "available_margin": self.available_margin,
             "initial_capital": investment_amount,
             "timeframe": timeframe,
             "tick_interval_sec": tick_interval_sec,
+            "execution_environment": str(tc.get("execution_environment") or "live"),
         }
 
     def param(self, name: str, default: Any = None) -> Any:
         if name not in self._params:
             self._params[name] = default
         return self._params[name]
+
+    def bind_ai(self, client: Any) -> None:
+        self.ai = client
+
+    def ask_ai(self, prompt: str = "", **kwargs: Any):
+        return self.ai.evaluate(prompt, **kwargs)
 
     def bars(self, n: int = 1):
         try:
@@ -492,6 +532,24 @@ class StrategyScriptContext:
                 timestamp=row.get('time')
             ))
         return out
+
+    def factor(self, factor_id: str, **params: Any) -> float:
+        """Compute a CTA-compatible technical factor without future-bar access."""
+        from app.services.factors import FactorError, get_factor, compute_factor
+
+        definition = get_factor(factor_id)
+        if "cta" not in definition.supported_contexts:
+            raise FactorError("factor.contextNotSupported")
+        end = min(max(self.current_index + 1, 0), len(self._bars_df))
+        if end <= 0:
+            raise FactorError("factor.noData")
+        frame = self._bars_df.iloc[:end].copy()
+        try:
+            return compute_factor(factor_id, frame, params)
+        except FactorError as exc:
+            if exc.code in {"factor.insufficientHistory", "factor.noData"}:
+                return float("nan")
+            raise
 
     def log(self, message: Any):
         if self._max_logs_per_flush <= 0:
@@ -516,6 +574,122 @@ class StrategyScriptContext:
         except Exception:
             pass
 
+    def pending_orders(self) -> List[Dict[str, Any]]:
+        return [dict(order) for order in self._orders]
+
+    def pending_signals(self) -> List[StrategySignal]:
+        timestamp = self._current_signal_timestamp()
+        out: List[StrategySignal] = []
+        for order in self._orders:
+            out.append(StrategySignal.from_script_order(
+                order,
+                timestamp=timestamp,
+                strategy_id=self.strategy_id,
+                strategy_run_id=self.strategy_run_id,
+                symbol=self.symbol,
+                market_type=self.market_type,
+            ))
+        return out
+
+    def flush_orders(self) -> List[Dict[str, Any]]:
+        out = self.pending_orders()
+        self._orders.clear()
+        return out
+
+    def flush_signals(self) -> List[StrategySignal]:
+        out = self.pending_signals()
+        self._orders.clear()
+        return out
+
+    def _current_signal_timestamp(self) -> Any:
+        try:
+            if self.current_index >= 0 and self.current_index < len(self._bars_df):
+                row = self._bars_df.iloc[self.current_index]
+                return row.get("time") if hasattr(row, "get") else self.current_index
+        except Exception:
+            pass
+        return self.current_index
+
+    def _current_mark_price(self, fallback: Any = None) -> float:
+        try:
+            value = float(fallback)
+            if np.isfinite(value) and value > 0:
+                return value
+        except Exception:
+            pass
+        try:
+            if self.current_index >= 0 and self.current_index < len(self._bars_df):
+                row = self._bars_df.iloc[self.current_index]
+                for key in ("close", "open", "high", "low"):
+                    value = float(row.get(key) or 0.0)
+                    if np.isfinite(value) and value > 0:
+                        return value
+        except Exception:
+            pass
+        return 0.0
+
+    def _normalize_side(self, side: Any) -> str:
+        side_norm = str(side or "long").strip().lower()
+        return "short" if side_norm == "short" else "long"
+
+    def _side_size(self, side: str) -> float:
+        try:
+            return float(self.positions.get(side, {}).get("size") or 0.0)
+        except Exception:
+            return 0.0
+
+    def _side_entry(self, side: str) -> float:
+        try:
+            return float(self.positions.get(side, {}).get("entry_price") or 0.0)
+        except Exception:
+            return 0.0
+
+    def _append_quote_order(
+        self,
+        *,
+        side: str,
+        quote_amount: float,
+        price: Any = None,
+        reason: Optional[str] = None,
+    ) -> None:
+        quote = max(0.0, float(quote_amount or 0.0))
+        if quote <= 0:
+            return
+        if side == "short":
+            action = "sell"
+            intent = "add_short" if self._side_size("short") > 0 else "open_short"
+        else:
+            action = "buy"
+            intent = "add_long" if self._side_size("long") > 0 else "open_long"
+        self._orders.append({
+            "action": action,
+            "price": price,
+            "amount": None,
+            "intent": intent,
+            "reason": reason or f"script_order_value_{side}",
+            "script_quote_amount": quote,
+        })
+
+    def _append_reduce_value_order(
+        self,
+        *,
+        side: str,
+        quote_amount: float,
+        price: Any = None,
+        reason: Optional[str] = None,
+    ) -> None:
+        quote = max(0.0, float(quote_amount or 0.0))
+        mark = self._current_mark_price(price)
+        if quote <= 0 or mark <= 0:
+            return
+        qty = min(self._side_size(side), quote / mark)
+        if qty <= 0:
+            return
+        if side == "short":
+            self.reduce_short(amount=qty, price=price, reason=reason or "script_order_value_short")
+        else:
+            self.reduce_long(amount=qty, price=price, reason=reason or "script_order_value_long")
+
     def basket(self, side: str = "long"):
         side_norm = "short" if str(side or "").strip().lower() == "short" else "long"
         if side_norm not in self._baskets:
@@ -535,10 +709,20 @@ class StrategyScriptContext:
             )
         return self._baskets[side_norm]
 
-    def buy(self, price: Any = None, amount: Any = None, *, intent: str = 'auto', reason: Optional[str] = None):
-        # ``intent`` lets hedge-aware bot scripts disambiguate between
-        # "close my short leg" vs "open/add a long leg" instead of forcing the
-        # executor to guess from the (single-net) position view.
+    def configure_robot(self, robot_type: str, config: Dict[str, Any]) -> Dict[str, Any]:
+        clean_type = str(robot_type or "").strip().lower()
+        if clean_type not in {"grid", "dca", "martingale", "layered_martingale"}:
+            raise ValueError("unsupported_robot_type")
+        if not isinstance(config, dict):
+            raise ValueError("robot_config_must_be_mapping")
+        definition = {
+            "robot_type": clean_type,
+            "config": dict(config),
+        }
+        self.runtime["robot_definition"] = definition
+        return definition
+
+    def buy(self, price: Any = None, amount: Any = None, *, intent: str = 'open_long', reason: Optional[str] = None):
         self._orders.append({
             'action': 'buy',
             'price': price,
@@ -547,7 +731,7 @@ class StrategyScriptContext:
             'reason': reason,
         })
 
-    def sell(self, price: Any = None, amount: Any = None, *, intent: str = 'auto', reason: Optional[str] = None):
+    def sell(self, price: Any = None, amount: Any = None, *, intent: str = 'open_short', reason: Optional[str] = None):
         self._orders.append({
             'action': 'sell',
             'price': price,
@@ -565,6 +749,15 @@ class StrategyScriptContext:
             'reason': reason or 'script_close_long',
         })
 
+    def reduce_long(self, amount: Any = None, price: Any = None, reason: Optional[str] = None):
+        self._orders.append({
+            'action': 'sell',
+            'price': price,
+            'amount': amount,
+            'intent': 'reduce_long',
+            'reason': reason or 'script_reduce_long',
+        })
+
     def close_short(self, amount: Any = None, price: Any = None, reason: Optional[str] = None):
         self._orders.append({
             'action': 'buy',
@@ -572,6 +765,15 @@ class StrategyScriptContext:
             'amount': amount,
             'intent': 'close_short',
             'reason': reason or 'script_close_short',
+        })
+
+    def reduce_short(self, amount: Any = None, price: Any = None, reason: Optional[str] = None):
+        self._orders.append({
+            'action': 'buy',
+            'price': price,
+            'amount': amount,
+            'intent': 'reduce_short',
+            'reason': reason or 'script_reduce_short',
         })
 
     def open_long(self, amount: Any = None, price: Any = None, reason: Optional[str] = None):
@@ -610,14 +812,62 @@ class StrategyScriptContext:
             'reason': reason or 'script_add_short',
         })
 
+    def order_value(self, value: Any, side: str = "long", price: Any = None, reason: Optional[str] = None):
+        side_norm = self._normalize_side(side)
+        try:
+            quote_value = float(value or 0.0)
+        except Exception:
+            return
+        if not np.isfinite(quote_value) or abs(quote_value) <= 1e-12:
+            return
+        if quote_value > 0:
+            self._append_quote_order(
+                side=side_norm,
+                quote_amount=quote_value,
+                price=price,
+                reason=reason or "script_order_value",
+            )
+        else:
+            self._append_reduce_value_order(
+                side=side_norm,
+                quote_amount=abs(quote_value),
+                price=price,
+                reason=reason or "script_order_value_reduce",
+            )
+
+    def order_target(self, target_value: Any, side: str = "long", price: Any = None, reason: Optional[str] = None):
+        side_norm = self._normalize_side(side)
+        try:
+            target = max(0.0, float(target_value or 0.0))
+        except Exception:
+            return
+        if not np.isfinite(target):
+            return
+        current_size = self._side_size(side_norm)
+        mark = self._current_mark_price(price)
+        if target <= 1e-12:
+            if side_norm == "short":
+                self.close_short(reason=reason or "script_order_target_close")
+            else:
+                self.close_long(reason=reason or "script_order_target_close")
+            return
+        if mark <= 0:
+            return
+        current_value = current_size * mark
+        delta = target - current_value
+        if abs(delta) <= max(1e-8, mark * 1e-12):
+            return
+        self.order_value(delta, side=side_norm, price=price, reason=reason or "script_order_target")
+
     def close_position(self):
-        self._orders.append({'action': 'close'})
+        self._orders.append({'action': 'sell', 'intent': 'close_long'})
+        self._orders.append({'action': 'buy', 'intent': 'close_short'})
 
 
 def compile_strategy_script_handlers(code: str) -> Tuple[Optional[Callable], Optional[Callable]]:
-    """
-    校验并编译策略脚本，返回 (on_init, on_bar)。
-    on_bar 不可缺省；on_init 可选。
+    """Validate and compile a ScriptStrategy, returning ``(on_init, on_bar)``.
+
+    ``on_bar`` is required; ``on_init`` is optional.
     """
     if not code or not str(code).strip():
         raise ValueError("Strategy script is empty")

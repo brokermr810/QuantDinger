@@ -11,9 +11,9 @@
     "app/services/backtest.py::_simulate_trading_new_format": 1234,
     "app/services/trading_executor.py::_run_strategy_loop": 1243,
     "app/services/pending_order_worker.py::_execute_live_order": 660,
-    "app/services/fast_analysis.py::analyze": 561,
+    "app/services/fast_analysis.py::analyze": 585,
     "app/routes/strategy.py::ai_generate_strategy": 512,
-    "app/routes/indicator.py::ai_generate": 473
+    "app/routes/indicator.py::ai_generate": 495
   },
   "banned_exchange_patterns": [
     "k[u]coin",

@@ -197,8 +197,10 @@ class AlpacaClient:
                 paper=self.config.paper,
                 url_override=self.config.base_url,
             )
-            # Align market-data REST with paper sandbox when using PK* keys.
-            data_sandbox = bool(self.config.paper)
+            # Paper trading keys use the standard Alpaca market-data endpoint.
+            # The SDK sandbox flag targets a separate data sandbox and rejects
+            # normal PK-prefixed paper credentials.
+            data_sandbox = False
             self._stock_data_client = modules["StockHistoricalDataClient"](
                 api_key=api_key,
                 secret_key=secret_key,
@@ -251,6 +253,21 @@ class AlpacaClient:
             self._ensure_connected()
             modules = _ensure_alpaca()
             sym, asset_class = parse_symbol(symbol, market_hint=_market_hint_from_type(market_type))
+            requested_quantity = float(quantity)
+            if asset_class == "crypto" and side.lower() == "sell":
+                positions = self._trading_client.get_all_positions()
+                matching = next(
+                    (
+                        position
+                        for position in positions
+                        if str(getattr(position, "symbol", "") or "").replace("/", "").upper()
+                        == sym.replace("/", "").upper()
+                    ),
+                    None,
+                )
+                available_quantity = _num(getattr(matching, "qty", 0)) if matching else 0.0
+                if 0 < available_quantity < requested_quantity:
+                    quantity = available_quantity
 
             req = modules["MarketOrderRequest"](
                 symbol=sym,
@@ -280,6 +297,8 @@ class AlpacaClient:
                     "id": str(order.id),
                     "status": status,
                     "filled_qty": filled_qty,
+                    "requested_qty": requested_quantity,
+                    "submitted_qty": float(quantity),
                     "submitted_at": str(order.submitted_at),
                 },
             )

@@ -72,7 +72,7 @@
         "type": "object",
         "required": ["code","market","symbol","timeframe","start_date","end_date"],
         "properties": {
-          "code":             { "type": "string", "description": "Indicator code (Python)" },
+          "code":             { "type": "string", "description": "ScriptStrategy Python code using on_init(ctx) and on_bar(ctx, bar)" },
           "market":           { "type": "string", "example": "Crypto" },
           "symbol":           { "type": "string", "example": "BTC/USDT" },
           "timeframe":        { "type": "string", "example": "1D" },
@@ -86,7 +86,9 @@
           "strictMode":       { "type": "boolean", "default": true, "description": "When true, signals execute on next bar open (live-aligned). When false, uses aggressive MTF/bar path." },
           "strict_mode":      { "type": "boolean", "description": "Alias for strictMode" },
           "strategy_config":  { "type": "object" },
-          "indicator_params": { "type": "object" }
+          "script_params":    { "type": "object" },
+          "params":           { "type": "object", "description": "Alias for script_params" },
+          "market_type":      { "type": "string", "enum": ["spot", "swap"], "nullable": true }
         }
       },
       "IndicatorValidateRequest": {
@@ -241,7 +243,7 @@
         "responses": { "200": { "description": "OK" } }
       }
     },
-    "/api/agent/v1/backtests": {
+    "/api/agent/v1/backtest/run": {
       "post": {
         "summary": "Submit a backtest job",
         "x-scope-class": "B",
@@ -291,7 +293,7 @@
     },
     "/api/agent/v1/indicators/link-config": {
       "post": {
-        "summary": "Normalize indicator_config: auto-save embedded code + set indicator_id",
+        "summary": "Normalize chart-indicator config for the indicator library; not an executable strategy path",
         "x-scope-class": "W",
         "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
         "responses": { "200": { "description": "Linked config" } }

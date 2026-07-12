@@ -56,7 +56,7 @@ def _ensure_ib_insync():
 class IBKRConfig:
     """IBKR connection configuration."""
     host: str = "127.0.0.1"
-    port: int = 7497  # TWS Live:7496, TWS Paper:7497, Gateway Live:4001, Gateway Paper:4002
+    port: int = 7497  # TWS Live:7496, TWS Paper:7497 (IB defaults), Gateway Live:4001, Gateway Paper:4002
     client_id: int = 1
     readonly: bool = False
     account: str = ""  # Leave empty to auto-select first account
@@ -80,7 +80,7 @@ class IBKRClient:
     Interactive Brokers Trading Client
     
     Usage:
-        config = IBKRConfig(port=7497)  # TWS Paper default
+        config = IBKRConfig(port=7497)  # IB default for TWS Paper
         client = IBKRClient(config)
         
         if client.connect():
@@ -362,7 +362,68 @@ class IBKRClient:
         except Exception as e:
             logger.error(f"Cancel order failed: {e}")
             return False
-    
+
+    def get_order_status(self, order_id: int) -> OrderResult:
+        """Return the latest known status for an open or completed order."""
+        try:
+            self._ensure_connected()
+            requested = str(order_id or "").strip()
+            if not requested:
+                return OrderResult(success=False, message="Missing order_id")
+
+            trades = []
+            for method_name, args in (
+                ("openTrades", ()),
+                ("trades", ()),
+                ("reqCompletedOrders", (False,)),
+            ):
+                method = getattr(self._ib, method_name, None)
+                if not callable(method):
+                    continue
+                try:
+                    trades.extend(list(method(*args) or []))
+                except Exception:
+                    continue
+
+            for trade in trades:
+                order = getattr(trade, "order", None)
+                order_status = getattr(trade, "orderStatus", None)
+                candidate_ids = {
+                    str(getattr(order, "orderId", "") or ""),
+                    str(getattr(order, "permId", "") or ""),
+                }
+                if requested not in candidate_ids:
+                    continue
+                status = str(getattr(order_status, "status", "") or "Unknown")
+                filled = float(getattr(order_status, "filled", 0) or 0)
+                avg_price = float(getattr(order_status, "avgFillPrice", 0) or 0)
+                rejected = status.lower() in ("cancelled", "apicancelled", "inactive")
+                return OrderResult(
+                    success=not rejected,
+                    order_id=getattr(order, "orderId", order_id),
+                    filled=filled,
+                    avg_price=avg_price,
+                    status=status,
+                    message=f"Order {status}",
+                    raw={
+                        "orderId": getattr(order, "orderId", order_id),
+                        "permId": getattr(order, "permId", 0),
+                        "status": status,
+                        "filled": filled,
+                        "remaining": float(getattr(order_status, "remaining", 0) or 0),
+                        "avgFillPrice": avg_price,
+                    },
+                )
+            return OrderResult(
+                success=True,
+                order_id=order_id,
+                status="Unknown",
+                message="Order not found in the current IBKR session",
+            )
+        except Exception as e:
+            logger.error(f"Get order status failed: {e}")
+            return OrderResult(success=False, order_id=order_id, message=str(e))
+
     # ==================== Query Methods ====================
     
     def get_account_summary(self) -> Dict[str, Any]:

@@ -157,7 +157,7 @@ def test_bot_script_small_quote_amount_stays_quote_not_base_qty():
     assert sigs[0]["script_quote_amount"] == 0.5
 
 
-@patch.object(TradingExecutor, "_execute_exchange_order", return_value={"success": True})
+@patch.object(TradingExecutor, "_submit_signal_order", return_value={"success": True})
 @patch.object(TradingExecutor, "_get_available_capital", return_value=50.0)
 @patch.object(TradingExecutor, "_get_daily_pnl", return_value=0.0)
 def test_execute_signal_uses_script_base_qty_for_open(_daily, _cap, mock_order):
@@ -186,7 +186,7 @@ def test_execute_signal_uses_script_base_qty_for_open(_daily, _cap, mock_order):
     assert mock_order.call_args.kwargs["amount"] == 42.5
 
 
-@patch.object(TradingExecutor, "_execute_exchange_order", return_value={"success": True})
+@patch.object(TradingExecutor, "_submit_signal_order", return_value={"success": True})
 @patch.object(TradingExecutor, "_get_available_capital", return_value=100.0)
 @patch.object(TradingExecutor, "_get_daily_pnl", return_value=0.0)
 def test_execute_signal_uses_bot_script_quote_amount_with_leverage(_daily, _cap, mock_order):
@@ -215,7 +215,36 @@ def test_execute_signal_uses_bot_script_quote_amount_with_leverage(_daily, _cap,
     assert mock_order.call_args.kwargs["amount"] == pytest.approx(3.22 * 5 / 668.2)
 
 
-@patch.object(TradingExecutor, "_execute_exchange_order", return_value={"success": True})
+@patch.object(TradingExecutor, "_submit_signal_order", return_value={"success": True})
+@patch.object(TradingExecutor, "_get_available_capital", return_value=100.0)
+@patch.object(TradingExecutor, "_get_daily_pnl", return_value=0.0)
+def test_execute_signal_uses_plain_script_quote_amount_with_leverage(_daily, _cap, mock_order):
+    ex = _make_executor()
+
+    ok = ex._execute_signal(
+        strategy_id=34,
+        strategy_name="plain-script",
+        exchange=MagicMock(),
+        symbol="MSFT/USDT",
+        current_price=100.0,
+        signal_type="open_long",
+        position_size=0,
+        current_positions=[],
+        trade_direction="long",
+        leverage=2,
+        initial_capital=100.0,
+        market_type="swap",
+        execution_mode="live",
+        trading_config={},
+        script_quote_amount=25.0,
+    )
+
+    assert ok is True
+    mock_order.assert_called_once()
+    assert mock_order.call_args.kwargs["amount"] == pytest.approx(25.0 * 2 / 100.0)
+
+
+@patch.object(TradingExecutor, "_submit_signal_order", return_value={"success": True})
 @patch.object(TradingExecutor, "_get_available_capital", return_value=100.0)
 @patch.object(TradingExecutor, "_get_daily_pnl", return_value=0.0)
 def test_execute_signal_uses_small_bot_quote_amount_with_leverage(_daily, _cap, mock_order):
@@ -245,7 +274,7 @@ def test_execute_signal_uses_small_bot_quote_amount_with_leverage(_daily, _cap, 
 
 
 @patch("app.services.trading_executor.append_strategy_log")
-@patch.object(TradingExecutor, "_execute_exchange_order", return_value={"success": True})
+@patch.object(TradingExecutor, "_submit_signal_order", return_value={"success": True})
 @patch.object(TradingExecutor, "_get_available_capital", return_value=100.0)
 @patch.object(TradingExecutor, "_get_daily_pnl", return_value=0.0)
 def test_execute_signal_rejects_script_base_qty_above_capital(_daily, _cap, mock_order, mock_log):
@@ -274,7 +303,7 @@ def test_execute_signal_rejects_script_base_qty_above_capital(_daily, _cap, mock
     assert "script order amount exceeds capital" in mock_log.call_args.args[2]
 
 
-@patch.object(TradingExecutor, "_execute_exchange_order", return_value={"success": True})
+@patch.object(TradingExecutor, "_submit_signal_order", return_value={"success": True})
 @patch.object(TradingExecutor, "_get_available_capital", return_value=50.0)
 @patch.object(TradingExecutor, "_get_daily_pnl", return_value=0.0)
 def test_execute_signal_falls_back_to_entry_pct_without_script_qty(_daily, _cap, mock_order):
@@ -326,7 +355,7 @@ def test_fetch_latest_kline_keeps_xaut_on_configured_crypto_market():
 
 
 @patch("app.services.trading_executor.append_strategy_log")
-@patch.object(TradingExecutor, "_execute_exchange_order", return_value={"success": True})
+@patch.object(TradingExecutor, "_submit_signal_order", return_value={"success": True})
 @patch.object(TradingExecutor, "_get_available_capital", return_value=100.0)
 @patch.object(TradingExecutor, "_get_daily_pnl", return_value=0.0)
 def test_signal_mode_close_records_matched_entry_price(_daily, _cap, _order, _log):
@@ -360,7 +389,7 @@ def test_signal_mode_close_records_matched_entry_price(_daily, _cap, _order, _lo
 
 
 @patch("app.services.trading_executor.append_strategy_log")
-@patch.object(TradingExecutor, "_execute_exchange_order", return_value={"success": True})
+@patch.object(TradingExecutor, "_submit_signal_order", return_value={"success": True})
 @patch.object(TradingExecutor, "_get_available_capital", return_value=100.0)
 @patch.object(TradingExecutor, "_get_daily_pnl", return_value=0.0)
 def test_signal_mode_rejects_ghost_close_without_unmatched_open_trade(_daily, _cap, mock_order, _log):

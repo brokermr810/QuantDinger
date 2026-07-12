@@ -7,9 +7,8 @@ from app.utils.logger import get_logger
 from app.utils.db import get_db_connection
 from app.services.exchange_execution import coalesce_exchange_config_from_payload
 from app.services.strategy_config import (
-    apply_cross_sectional_trading_config as _apply_cross_sectional_trading_config,
+    apply_code_strategy_config_from_script_code as _apply_code_strategy_config_from_script_code,
     apply_default_strict_mode as _apply_default_strict_mode,
-    apply_risk_flat_from_indicator_code as _apply_risk_flat_from_indicator_code,
     strip_legacy_risk_pct_basis as _strip_legacy_risk_pct_basis,
 )
 from app.services.symbol_name import normalize_crypto_symbol
@@ -40,6 +39,94 @@ def get_strategy_service() -> "StrategyService":
     if _strategy_service_singleton is None:
         _strategy_service_singleton = StrategyService()
     return _strategy_service_singleton
+
+
+_STRATEGY_SECRET_KEYS = {
+    "api_key",
+    "apikey",
+    "secret_key",
+    "secretkey",
+    "secret",
+    "passphrase",
+    "password",
+    "private_key",
+    "privatekey",
+    "access_token",
+    "accesstoken",
+    "refresh_token",
+    "refreshtoken",
+    "bot_token",
+    "bottoken",
+    "webhook_secret",
+    "webhooksecret",
+    "signing_secret",
+    "signingsecret",
+    "client_secret",
+    "clientsecret",
+}
+
+
+def _secret_key_name(key: Any) -> bool:
+    return str(key or "").replace("-", "_").lower() in _STRATEGY_SECRET_KEYS
+
+
+def _contains_secret(value: Any) -> bool:
+    if isinstance(value, dict):
+        return any(
+            (_secret_key_name(k) and v not in (None, "", False)) or _contains_secret(v)
+            for k, v in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_secret(v) for v in value)
+    return False
+
+
+def _has_credential_ref(exchange_config: Dict[str, Any]) -> bool:
+    return bool(exchange_config.get("credential_id") or exchange_config.get("credentials_id"))
+
+
+def reject_inline_strategy_secrets(exchange_config: Any) -> None:
+    if not isinstance(exchange_config, dict) or _has_credential_ref(exchange_config):
+        return
+    if _contains_secret(exchange_config):
+        raise ValueError("INLINE_STRATEGY_SECRETS_NOT_ALLOWED")
+
+
+def strip_strategy_secrets(value: Any) -> Any:
+    if isinstance(value, dict):
+        out: Dict[str, Any] = {}
+        for k, v in value.items():
+            if _secret_key_name(k):
+                continue
+            out[k] = strip_strategy_secrets(v)
+        return out
+    if isinstance(value, list):
+        return [strip_strategy_secrets(v) for v in value]
+    return value
+
+
+def redact_strategy_secrets(value: Any) -> Any:
+    if isinstance(value, dict):
+        out: Dict[str, Any] = {}
+        for k, v in value.items():
+            if _secret_key_name(k) and v not in (None, "", False):
+                out[k] = "***"
+            else:
+                out[k] = redact_strategy_secrets(v)
+        return out
+    if isinstance(value, list):
+        return [redact_strategy_secrets(v) for v in value]
+    return value
+
+
+def redact_strategy_row(row: Dict[str, Any] | None) -> Dict[str, Any] | None:
+    if not row:
+        return row
+    out = dict(row)
+    for field in ("exchange_config", "trading_config", "notification_config", "ai_model_config"):
+        if field in out:
+            out[field] = redact_strategy_secrets(out[field])
+    return out
 
 
 # Note: broker / market / market_type / trade_direction / bot_type compatibility
@@ -585,9 +672,9 @@ class StrategyService:
                 )
                 row = cur.fetchone()
                 cur.close()
-            return (row or {}).get('strategy_type') or 'IndicatorStrategy'
+            return (row or {}).get('strategy_type') or 'ScriptStrategy'
         except Exception:
-            return 'IndicatorStrategy'
+            return 'ScriptStrategy'
 
     def update_strategy_status(self, strategy_id: int, status: str, user_id: int = None) -> bool:
         """Update strategy status. If user_id is provided, verify ownership."""
@@ -787,14 +874,6 @@ class StrategyService:
                 self._display_item('dipThreshold', 'trading-bot.dca.dipThreshold', self._to_float(params.get('dipThreshold'), 0.0), 'percent'),
             ]
 
-        if self._to_float(tc.get('stop_loss_pct'), 0.0) > 0:
-            display['risk_params'].append(
-                self._display_item('stopLossPct', 'trading-bot.risk.stopLossPct', self._to_float(tc.get('stop_loss_pct'), 0.0), 'percent')
-            )
-        if self._to_float(tc.get('take_profit_pct'), 0.0) > 0:
-            display['risk_params'].append(
-                self._display_item('takeProfitPct', 'trading-bot.risk.takeProfitPct', self._to_float(tc.get('take_profit_pct'), 0.0), 'percent')
-            )
         if self._to_float(tc.get('max_position'), 0.0) > 0:
             display['risk_params'].append(
                 self._display_item('maxPosition', 'trading-bot.risk.maxPosition', self._to_float(tc.get('max_position'), 0.0), 'usdt')
@@ -872,6 +951,16 @@ class StrategyService:
 
             ids = [int(r['id']) for r in rows if r.get('id') is not None]
             metrics = self._compute_runtime_metrics(ids)
+            try:
+                from app.services.strategy_runtime.health import load_runtime_health
+
+                runtime_health = load_runtime_health(
+                    ids,
+                    strategy_statuses={int(row['id']): str(row.get('status') or '') for row in rows},
+                )
+            except Exception as exc:
+                logger.warning(f"compute runtime health failed: {exc}")
+                runtime_health = {}
 
             out = []
             for r in rows:
@@ -898,6 +987,7 @@ class StrategyService:
                     'total_pnl': total_pnl,
                     'total_pnl_pct': total_pnl_pct,
                     'current_equity': current_equity,
+                    'runtime_health': runtime_health.get(int(r['id']), {}),
                 })
             return out
         except Exception as e:
@@ -946,31 +1036,45 @@ class StrategyService:
             raise ValueError("strategy_name is required")
 
         user_id = payload.get('user_id') or 1
-        strategy_type = payload.get('strategy_type') or 'IndicatorStrategy'
-        market_category = payload.get('market_category') or 'Crypto'
+        strategy_type = payload.get('strategy_type') or 'ScriptStrategy'
+        if strategy_type != 'ScriptStrategy':
+            raise ValueError(
+                "Indicators are chart-only. Create a ScriptStrategy for backtesting or live trading."
+            )
+        market_category = payload.get('market_category') or payload.get('market') or 'Crypto'
         execution_mode = payload.get('execution_mode') or 'signal'
         notification_config = payload.get('notification_config') or {}
 
-        indicator_config = payload.get('indicator_config') or {}
-        if strategy_type == 'IndicatorStrategy':
-            from app.services.indicator_workspace import link_indicator_config
-            indicator_config = link_indicator_config(
-                int(user_id or 1),
-                indicator_config,
-                auto_save=True,
-            )
-            payload['indicator_config'] = indicator_config
+        indicator_config = {}
         trading_config = _strip_legacy_risk_pct_basis(
             _apply_default_strict_mode(payload.get('trading_config') or {})
         )
+        for source_key, target_key in (
+            ('symbol', 'symbol'),
+            ('trading_pair', 'symbol'),
+            ('timeframe', 'timeframe'),
+            ('market_type', 'market_type'),
+            ('marketType', 'market_type'),
+            ('trade_direction', 'trade_direction'),
+            ('tradeDirection', 'trade_direction'),
+            ('leverage', 'leverage'),
+            ('initial_capital', 'initial_capital'),
+            ('investment_amount', 'initial_capital'),
+            ('indicator_id', 'indicator_id'),
+            ('indicatorId', 'indicator_id'),
+            ('script_source_id', 'script_source_id'),
+            ('scriptSourceId', 'script_source_id'),
+        ):
+            if payload.get(source_key) is not None and trading_config.get(target_key) is None:
+                trading_config[target_key] = payload.get(source_key)
+        trading_config['market_category'] = market_category
         trading_config = self._sanitize_grid_trading_config(trading_config)
-        if strategy_type == 'IndicatorStrategy':
-            trading_config = _apply_risk_flat_from_indicator_code(
-                trading_config, indicator_config
-            )
         from app.services.exchange_execution import coalesce_exchange_config_from_payload, resolve_exchange_config
 
         exchange_config = coalesce_exchange_config_from_payload(payload)
+        if isinstance(exchange_config, dict) and _has_credential_ref(exchange_config):
+            exchange_config = strip_strategy_secrets(exchange_config)
+        reject_inline_strategy_secrets(exchange_config)
 
         resolved_ex_cfg = resolve_exchange_config(
             exchange_config if isinstance(exchange_config, dict) else {},
@@ -1030,24 +1134,10 @@ class StrategyService:
         trading_config['investment_amount'] = initial_capital
         leverage = (trading_config or {}).get('leverage') or 1
         market_type = (trading_config or {}).get('market_type') or 'swap'
-        
-        # Cross-sectional strategy fields (store in trading_config to avoid DB schema changes)
-        cs_strategy_type = payload.get('cs_strategy_type') or trading_config.get('cs_strategy_type') or 'single'
-        if (cs_strategy_type or '').strip().lower() == 'cross_sectional':
-            trading_config = _apply_cross_sectional_trading_config(
-                trading_config,
-                cs_strategy_type=cs_strategy_type,
-                symbol_list=payload.get('symbol_list') or trading_config.get('symbol_list') or [],
-                portfolio_size=payload.get('portfolio_size') or trading_config.get('portfolio_size') or 10,
-                long_ratio=payload.get('long_ratio') if payload.get('long_ratio') is not None else trading_config.get('long_ratio'),
-                rebalance_frequency=payload.get('rebalance_frequency') or trading_config.get('rebalance_frequency'),
-                market_category=market_category,
-                market_type=market_type,
-            )
-            symbol = trading_config.get('symbol') or symbol
 
-        strategy_mode = payload.get('strategy_mode') or 'signal'
+        strategy_mode = payload.get('strategy_mode') or 'script'
         strategy_code = payload.get('strategy_code') or ''
+        script_source_code = ''
         if strategy_type == 'ScriptStrategy' or strategy_mode in ('script', 'bot'):
             script_source_id = (trading_config or {}).get('script_source_id') or (trading_config or {}).get('scriptSourceId')
             if script_source_id:
@@ -1055,8 +1145,17 @@ class StrategyService:
                 source = get_script_source_service().get_source(int(script_source_id), user_id=user_id)
                 if not source:
                     raise ValueError("script source not found")
+                script_source_code = str((source or {}).get('code') or '')
                 trading_config['script_source_id'] = int(script_source_id)
                 trading_config['script_role'] = trading_config.get('script_role') or 'runtime'
+            trading_config = _apply_code_strategy_config_from_script_code(
+                trading_config,
+                {'script_code': strategy_code or script_source_code},
+            )
+            code_cfg = trading_config.get('_strategy_cfg_from_code') if isinstance(trading_config, dict) else {}
+            if isinstance(code_cfg, dict) and code_cfg.get('timeframe'):
+                timeframe = str(code_cfg.get('timeframe'))
+                trading_config['timeframe'] = timeframe
 
         with get_db_connection() as db:
             cur = db.cursor()
@@ -1101,7 +1200,11 @@ class StrategyService:
 
     def batch_create_strategies(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Batch create strategies (multi-symbol)
+        Batch create CTA strategies (multi-symbol fan-out).
+
+        This is not a cross-sectional/portfolio strategy. ``payload.symbols``
+        is only a creation-time convenience: each symbol becomes an independent
+        strategy row with its own ``trading_config.symbol``.
         
         Args:
             payload: Contains symbols (array) and other strategy config
@@ -1386,11 +1489,6 @@ class StrategyService:
         else:
             trading_config = existing_tc
 
-        if (existing.get('strategy_type') or payload.get('strategy_type') or 'IndicatorStrategy') == 'IndicatorStrategy':
-            trading_config = _apply_risk_flat_from_indicator_code(
-                trading_config, indicator_config
-            )
-
         trading_config = self._sanitize_grid_trading_config(trading_config)
 
         # When credential_id is present, strip raw API keys to avoid
@@ -1399,39 +1497,7 @@ class StrategyService:
             for _secret_key in ('api_key', 'secret_key', 'passphrase', 'apiKey', 'secret', 'password'):
                 exchange_config.pop(_secret_key, None)
 
-        # Handle cross-sectional strategy config updates
         symbol = (trading_config or {}).get('symbol')
-        _upd_cs = payload.get('cs_strategy_type')
-        if _upd_cs is None:
-            _upd_cs = trading_config.get('cs_strategy_type')
-        if (_upd_cs or '').strip().lower() == 'cross_sectional':
-            trading_config = _apply_cross_sectional_trading_config(
-                trading_config,
-                cs_strategy_type='cross_sectional',
-                symbol_list=(
-                    payload.get('symbol_list')
-                    if payload.get('symbol_list') is not None
-                    else trading_config.get('symbol_list') or []
-                ),
-                portfolio_size=(
-                    payload.get('portfolio_size')
-                    if payload.get('portfolio_size') is not None
-                    else trading_config.get('portfolio_size')
-                ),
-                long_ratio=(
-                    payload.get('long_ratio')
-                    if payload.get('long_ratio') is not None
-                    else trading_config.get('long_ratio')
-                ),
-                rebalance_frequency=(
-                    payload.get('rebalance_frequency')
-                    if payload.get('rebalance_frequency') is not None
-                    else trading_config.get('rebalance_frequency')
-                ),
-                market_category=market_category,
-                market_type=(trading_config.get('market_type') or payload.get('market_type') or 'swap'),
-            )
-            symbol = trading_config.get('symbol') or symbol
 
         from app.services.exchange_execution import coalesce_exchange_config_from_payload, resolve_exchange_config as _resolve_ex_upd
 
@@ -1440,6 +1506,9 @@ class StrategyService:
             'exchange_config': exchange_config,
             'trading_config': trading_config,
         })
+        if isinstance(exchange_config, dict) and _has_credential_ref(exchange_config):
+            exchange_config = strip_strategy_secrets(exchange_config)
+        reject_inline_strategy_secrets(exchange_config)
 
         _merged_ex = _resolve_ex_upd(
             exchange_config if isinstance(exchange_config, dict) else {},
@@ -1483,13 +1552,18 @@ class StrategyService:
         market_type = (trading_config or {}).get('market_type') or existing.get('market_type') or 'swap'
 
         strategy_type = (payload.get('strategy_type') if payload.get('strategy_type') is not None
-                         else existing.get('strategy_type')) or 'IndicatorStrategy'
+                         else existing.get('strategy_type')) or 'ScriptStrategy'
         strategy_mode = (payload.get('strategy_mode') if payload.get('strategy_mode') is not None
-                         else existing.get('strategy_mode')) or 'signal'
+                         else existing.get('strategy_mode')) or 'script'
+        if strategy_type != 'ScriptStrategy':
+            raise ValueError(
+                "Indicators are chart-only. Create a ScriptStrategy for backtesting or live trading."
+            )
         if 'strategy_code' in payload:
             strategy_code = payload.get('strategy_code') or ''
         else:
             strategy_code = existing.get('strategy_code') or ''
+        script_source_code = ''
         if strategy_type == 'ScriptStrategy' or strategy_mode in ('script', 'bot'):
             script_source_id = (trading_config or {}).get('script_source_id') or (trading_config or {}).get('scriptSourceId')
             if script_source_id:
@@ -1497,8 +1571,17 @@ class StrategyService:
                 source = get_script_source_service().get_source(int(script_source_id), user_id=int(existing.get('user_id') or 1))
                 if not source:
                     raise ValueError("script source not found")
+                script_source_code = str((source or {}).get('code') or '')
                 trading_config['script_source_id'] = int(script_source_id)
                 trading_config['script_role'] = trading_config.get('script_role') or 'runtime'
+            trading_config = _apply_code_strategy_config_from_script_code(
+                trading_config,
+                {'script_code': strategy_code or script_source_code},
+            )
+            code_cfg = trading_config.get('_strategy_cfg_from_code') if isinstance(trading_config, dict) else {}
+            if isinstance(code_cfg, dict) and code_cfg.get('timeframe'):
+                timeframe = str(code_cfg.get('timeframe'))
+                trading_config['timeframe'] = timeframe
 
         with get_db_connection() as db:
             cur = db.cursor()

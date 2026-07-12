@@ -163,7 +163,7 @@ QuantDinger is a **self-hosted, local-first AI trading OS** — not a chatbot wi
 |---|----------------------------------|
 | **Full-stack AI trading OS** | Charting, indicator IDE, AI research, backtests, live bots, quick trade, and broker account management — one product, one Postgres state store. |
 | **Agent-native** | First-class **Agent Gateway** (`/api/agent/v1`) + **[`quantdinger-mcp`](https://pypi.org/project/quantdinger-mcp/)** on PyPI — Cursor, Claude Code, and Codex can read markets, run backtests, and trade (paper by default) with full audit logs. |
-| **Dual strategy runtimes** | **`IndicatorStrategy`** (four-way dataframe signals + chart overlays) and **`ScriptStrategy`** (event-driven `on_bar`, explicit orders) — research and production in the same codebase. |
+| **Clear indicator/strategy boundary** | Indicators are chart-only visual tools; **`ScriptStrategy`** is the execution path for backtests, live trading, risk, sizing, and orders. |
 | **Multi-venue execution** | Direct adapters for Binance, OKX, Bitget, Bybit, Gate, HTX, Coinbase Exchange, Kraken, **IBKR**, and **Alpaca** — unified Broker Accounts page with isolated multi-tenant sessions. |
 | **Production-grade infra** | **PostgreSQL 18** + **Redis 8**, connection pooling, background workers (orders, portfolio monitor, reflection), idempotent schema bootstrap, GHCR multi-arch images (amd64/arm64). |
 | **Security by default** | Refuses default `SECRET_KEY`, agent tokens hashed at rest, **paper-only trading** unless explicitly unlocked server-side, every agent call audit-logged. |
@@ -232,7 +232,7 @@ Deeper references: [AI Integration design](docs/agent/AI_INTEGRATION_DESIGN.md) 
 ## Features at a glance
 
 - **Research & AI** — Multi-LLM ensemble analysis, watchlists, opportunity radar, NL→Indicator/strategy, post-backtest AI hints; optional confidence calibration. **[Agent Gateway + MCP](#use-it-from-an-ai-agent-cursor--claude-code--codex--mcp)** for Cursor / Claude Code / Codex with scoped tokens and SSE job streaming.
-- **Build** — Professional KLine chart UI; `IndicatorStrategy` (four-way dataframe signals: `open_long`, `close_long`, `open_short`, `close_short`) and `ScriptStrategy` (`on_bar`, `ctx.buy()` / `ctx.sell()`); AI code generation as a starting point, Python as source of truth.
+- **Build** — Professional KLine chart UI; chart-only Python indicators for overlays, markers, lamp belts, and layers; `ScriptStrategy` for backtests, live trading, explicit `open_*` / `add_*` / `close_*` intents, risk, and sizing. AI code generation is a starting point, Python remains the source of truth.
 - **Validate** — Server-side backtests with equity curves, drawdown metrics, trade logs, and strategy snapshots — no client-side-only backtest theater.
 - **Operate** — Live strategy bots, quick trade, crypto spot/swap execution through direct exchange adapters, **IBKR** / **Alpaca** workflows for traditional markets; unified **Broker Accounts** page; notifications (Telegram, email, SMS, Discord, webhooks).
 - **Platform** — Docker Compose + GHCR images, PostgreSQL 18, Redis 8, OAuth, multi-user RBAC, credits / membership / USDT billing toggles, an 11-language web UI, and multilingual documentation.
@@ -611,53 +611,57 @@ Production-style TLS, domain, and reverse-proxy placement are covered in **[Clou
 
 ### Suggested first session (product walkthrough)
 
-After the stack is healthy: (1) run an **AI asset / market analysis** so LLM and data paths are verified; (2) open the **Indicator IDE**, load a symbol, and run a **signal backtest** on a small date range; (3) optionally use **AI code generation** to draft an indicator, then edit the Python; (4) when ready, attach **exchange API keys** (profile / credentials), use **test connection**, then explore **live strategy** or **quick trade** with execution mode you intend. This order surfaces configuration issues early before real capital.
+After the stack is healthy: (1) run an **AI asset / market analysis** so LLM and data paths are verified; (2) open the **Indicator IDE**, load a symbol, and run a chart-only indicator on a small date range; (3) optionally use **AI code generation** to draft an indicator, then edit the Python; (4) convert indicator ideas into ScriptStrategy drafts before backtesting or live trading; (5) when ready, attach **exchange API keys** (profile / credentials), use **test connection**, then explore **live strategy** or **quick trade** with the execution mode you intend. This order surfaces configuration issues early before real capital.
 
-## Minimal Example: Python Indicator Strategy
+## Minimal Example: Python Indicator
 
-This is the kind of Python-native strategy logic QuantDinger is designed for:
+This is a minimal chart-only Python indicator:
 
 ```python
 # @param sma_short int 14 Short moving average
 # @param sma_long int 28 Long moving average
 
-sma_short_period = params.get('sma_short', 14)
-sma_long_period = params.get('sma_long', 28)
+sma_short_period = int(params.get('sma_short', 14))
+sma_long_period = int(params.get('sma_long', 28))
 
-my_indicator_name = "Dual Moving Average Strategy"
-my_indicator_description = f"SMA {sma_short_period}/{sma_long_period} crossover"
+my_indicator_name = "Dual Moving Average Indicator"
+my_indicator_description = f"SMA {sma_short_period}/{sma_long_period} chart overlay"
 
 df = df.copy()
 sma_short = df["close"].rolling(sma_short_period).mean()
 sma_long = df["close"].rolling(sma_long_period).mean()
 
-def edge(signal):
-    signal = signal.fillna(False).astype(bool)
-    return signal & ~signal.shift(1).fillna(False)
+cross_up = (sma_short > sma_long) & (sma_short.shift(1) <= sma_long.shift(1))
+cross_down = (sma_short < sma_long) & (sma_short.shift(1) >= sma_long.shift(1))
 
-open_long = (sma_short > sma_long) & (sma_short.shift(1) <= sma_long.shift(1))
-open_short = (sma_short < sma_long) & (sma_short.shift(1) >= sma_long.shift(1))
-
-df["open_long"] = edge(open_long)
-df["close_long"] = edge(open_short)
-df["open_short"] = edge(open_short)
-df["close_short"] = edge(open_long)
+buy_marks = [
+    float(df["low"].iloc[i] * 0.995) if bool(cross_up.iloc[i]) else None
+    for i in range(len(df))
+]
+sell_marks = [
+    float(df["high"].iloc[i] * 1.005) if bool(cross_down.iloc[i]) else None
+    for i in range(len(df))
+]
 
 output = {
     "name": my_indicator_name,
     "plots": [
-        {"name": "SMA Short", "data": sma_short.fillna(0).tolist(), "color": "#FF9800", "overlay": True},
-        {"name": "SMA Long", "data": sma_long.fillna(0).tolist(), "color": "#3F51B5", "overlay": True},
+        {"name": "SMA Short", "data": sma_short.tolist(), "color": "#FF9800", "type": "line", "overlay": True},
+        {"name": "SMA Long", "data": sma_long.tolist(), "color": "#3F51B5", "type": "line", "overlay": True},
     ],
-    "signals": [],
+    "signals": [
+        {"type": "buy", "text": "Cross Up", "color": "#22c55e", "data": buy_marks},
+        {"type": "sell", "text": "Cross Down", "color": "#ef4444", "data": sell_marks},
+    ],
+    "layers": [],
 }
 ```
 
 See full examples:
 
-- [`docs/examples/dual_ma_with_params.py`](docs/examples/dual_ma_with_params.py)
+- [`docs/examples/chart_indicator_dual_ema.py`](docs/examples/chart_indicator_dual_ema.py)
 - [`docs/examples/multi_indicator_composite.py`](docs/examples/multi_indicator_composite.py)
-- [`docs/examples/cross_sectional_momentum_rsi.py`](docs/examples/cross_sectional_momentum_rsi.py)
+- [`docs/examples/script_strategy_dual_ema_long.py`](docs/examples/script_strategy_dual_ema_long.py)
 
 ## Supported Markets, Brokers, and Exchanges
 
@@ -686,23 +690,25 @@ See full examples:
 
 ## Strategy Development Modes
 
-QuantDinger supports two main strategy authoring models:
+QuantDinger separates visual indicators from executable strategies:
 
-### IndicatorStrategy
+### Indicators
 
-- dataframe-based Python scripts
-- four-way signal generation with `open_long`, `close_long`, `open_short`, and `close_short`
-- chart rendering and signal-style backtests
-- best for research, indicator logic, and visual strategy prototyping
+- chart-only Python code
+- plots, markers, lamp belts, layers, annotations, and visual parameters
+- no backtest, live trading, order sizing, stops, or position management
+- use AI conversion when an indicator idea needs to become a strategy
 
 ### ScriptStrategy
 
 - event-driven `on_init(ctx)` / `on_bar(ctx, bar)` scripts
-- explicit runtime control with `ctx.buy()`, `ctx.sell()`, `ctx.close_position()`
+- explicit runtime control with `ctx.open_long()`, `ctx.add_long()`, `ctx.close_long()`, `ctx.open_short()`, `ctx.add_short()`, and `ctx.close_short()`
+- `ctx.buy()` / `ctx.sell()` are convenience directional intents for simple one-position scripts; scale-in and multi-entry scripts must use `ctx.add_long()` / `ctx.add_short()` or basket child orders
 - best for stateful strategies, execution-oriented logic, and live alignment
 
 For the full developer workflow, see:
 
+- [Indicator Development Guide](docs/INDICATOR_DEV_GUIDE.md)
 - [Strategy Development Guide](docs/STRATEGY_DEV_GUIDE.md)
 - [Cross-Sectional Strategy Guide](docs/CROSS_SECTIONAL_STRATEGY_GUIDE_EN.md)
 - [Strategy Examples](docs/examples/)
@@ -764,6 +770,8 @@ Economic calendar data is free-first: QuantDinger uses the no-key AkShare/Wallst
 | [Multi-user](docs/multi-user-setup.md) | Postgres multi-tenant patterns |
 | [Agent environment](docs/agent/AGENT_ENVIRONMENT_DESIGN.md) · [AI integration](docs/agent/AI_INTEGRATION_DESIGN.md) · [Quickstart](docs/agent/AGENT_QUICKSTART.md) · [OpenAPI](docs/agent/agent-openapi.json) · [MCP server](mcp_server/README.md) | Coding agents & MCP (`quantdinger-mcp` on PyPI) |
 
+**Indicator:** [EN](docs/INDICATOR_DEV_GUIDE.md) · [CN](docs/INDICATOR_DEV_GUIDE_CN.md)
+
 **Strategy:** [EN](docs/STRATEGY_DEV_GUIDE.md) · [CN](docs/STRATEGY_DEV_GUIDE_CN.md) · [Cross-sectional EN](docs/CROSS_SECTIONAL_STRATEGY_GUIDE_EN.md) / [CN](docs/CROSS_SECTIONAL_STRATEGY_GUIDE_CN.md) · [Examples](docs/examples/)
 
 **Integrations & alerts:** [IBKR](docs/IBKR_TRADING_GUIDE_EN.md) · [OAuth EN](docs/OAUTH_CONFIG_EN.md) / [CN](docs/OAUTH_CONFIG_CN.md) · Telegram / Email / SMS configs under [`docs/`](docs/) (`NOTIFICATION_*`).
@@ -780,7 +788,7 @@ No. Crypto is a major focus, but the platform also includes IBKR and Alpaca work
 
 ### Can I write strategies directly in Python?
 
-Yes. QuantDinger supports both dataframe-style `IndicatorStrategy` development and event-driven `ScriptStrategy` development. You can also use AI to generate a starting point and then edit it yourself.
+Yes. QuantDinger supports chart-only Python indicators and event-driven `ScriptStrategy` development. Indicators are for visual research; strategies are for backtest and live execution. You can use AI to convert an indicator idea into a strategy draft and then edit it yourself.
 
 ### Is this a research tool or a live trading platform?
 

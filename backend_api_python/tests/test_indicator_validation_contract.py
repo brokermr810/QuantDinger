@@ -1,4 +1,4 @@
-"""Indicator validation enforces executable four-way columns."""
+"""Indicator validation is chart-only."""
 
 from __future__ import annotations
 
@@ -20,9 +20,8 @@ output = {
 """
 
 
-def test_validation_rejects_output_signals_without_execution_columns():
+def test_validation_accepts_output_signals_without_execution_columns():
     result = _validate_indicator_code_internal(OUTPUT_SIGNALS_ONLY)
-    assert result["success"] is False
-    assert result["error_type"] == "MissingExecutionColumns"
-    assert "output['signals'] is chart-only" in result["msg"]
-
+    assert result["success"] is True
+    assert result["error_type"] is None
+    assert result["signals_count"] == 1

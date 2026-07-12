@@ -1,4 +1,5 @@
-from app.services.backtest_execution import (
+﻿from app.services.backtest_execution import (
+    default_commission_if_missing,
     default_slippage_if_missing,
     merge_strict_mode_into_strategy_config,
     parse_strict_mode,
@@ -27,6 +28,13 @@ def test_default_slippage_if_missing():
     assert default_slippage_if_missing(None) == 0.0005
     assert default_slippage_if_missing('') == 0.0005
     assert default_slippage_if_missing(0.001) == 0.001
+
+
+def test_default_commission_if_missing():
+    assert default_commission_if_missing(None) == 0.0005
+    assert default_commission_if_missing('') == 0.0005
+    assert default_commission_if_missing(0) == 0.0
+    assert default_commission_if_missing(0.001) == 0.001
 
 
 def test_precision_info_for_run_modes():

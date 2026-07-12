@@ -29,6 +29,10 @@ class SymbolMasterRow:
     name: str
     exchange: str = ""
     currency: str = ""
+    market_type: str = "spot"
+    instrument_id: str = ""
+    settle_currency: str = ""
+    asset_class: str = ""
 
 
 STATIC_MARKET_ROWS = [
@@ -129,7 +133,7 @@ def _unique_rows(rows: Iterable[SymbolMasterRow]) -> List[SymbolMasterRow]:
     out: List[SymbolMasterRow] = []
     seen = set()
     for row in rows:
-        key = (row.market, row.symbol)
+        key = (row.market, row.symbol, row.exchange, row.market_type, row.instrument_id)
         if not row.market or not row.symbol or not row.name or key in seen:
             continue
         seen.add(key)
@@ -189,7 +193,8 @@ def fetch_hk_stock_symbols_hkex() -> List[SymbolMasterRow]:
         currency = _clean_text(item.get("Trading Currency")) or "HKD"
         symbol = re.sub(r"[^0-9]", "", _clean_text(raw_symbol)).zfill(5)
         if symbol and name and category in {"Equity", "Exchange Traded Products"}:
-            rows.append(SymbolMasterRow("HKStock", symbol, name, "HKEX", currency))
+            asset_class = "etf" if category == "Exchange Traded Products" else "equity"
+            rows.append(SymbolMasterRow("HKStock", symbol, name, "HKEX", currency, asset_class=asset_class))
     return _unique_rows(rows)
 
 
@@ -226,7 +231,10 @@ def fetch_us_stock_symbols() -> List[SymbolMasterRow]:
         test_issue = _clean_symbol(item.get("Test Issue"))
         etf = _clean_symbol(item.get("ETF"))
         if symbol and name and test_issue != "Y":
-            rows.append(SymbolMasterRow("USStock", symbol, name, "NASDAQ", "USD"))
+            rows.append(SymbolMasterRow(
+                "USStock", symbol, name, "NASDAQ", "USD",
+                asset_class="etf" if etf == "Y" else "equity",
+            ))
 
     other_rows = _fetch_nasdaq_trader_file("https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt")
     exchange_map = {
@@ -241,34 +249,75 @@ def fetch_us_stock_symbols() -> List[SymbolMasterRow]:
         name = _clean_text(item.get("Security Name"))
         exchange = exchange_map.get(_clean_symbol(item.get("Exchange")), _clean_symbol(item.get("Exchange")))
         test_issue = _clean_symbol(item.get("Test Issue"))
+        etf = _clean_symbol(item.get("ETF"))
         if symbol and name and test_issue != "Y":
-            rows.append(SymbolMasterRow("USStock", symbol, name, exchange, "USD"))
+            rows.append(SymbolMasterRow(
+                "USStock", symbol, name, exchange, "USD",
+                asset_class="etf" if etf == "Y" else "equity",
+            ))
 
     return _unique_rows(rows)
+
+
+def fetch_crypto_symbols_with_diagnostics():
+    """Fetch active USDT instruments and return per-context diagnostics."""
+    import ccxt  # type: ignore
+    from app.config.data_sources import CCXTConfig
+    from app.data_sources.crypto import PUBLIC_KLINE_EXCHANGE_IDS, resolve_ccxt_for_live_trading
+    from app.services.market.symbol_search import _classify_asset
+
+    rows: List[SymbolMasterRow] = []
+    contexts = []
+    for exchange_id in PUBLIC_KLINE_EXCHANGE_IDS:
+        for market_type in ("spot", "swap"):
+            context_rows: List[SymbolMasterRow] = []
+            try:
+                ccxt_id, options = resolve_ccxt_for_live_trading(exchange_id, market_type)
+                config = {"enableRateLimit": True, "timeout": CCXTConfig.TIMEOUT}
+                if options:
+                    config["options"] = options
+                exchange = getattr(ccxt, ccxt_id)(config)
+                exchange.load_markets()
+                for symbol, info in exchange.markets.items():
+                    is_target = bool(info.get("spot")) if market_type == "spot" else bool(info.get("swap"))
+                    quote = _clean_symbol(info.get("quote"))
+                    base = _clean_symbol(info.get("base"))
+                    if not info.get("active") or not is_target or quote != "USDT" or not base:
+                        continue
+                    context_rows.append(SymbolMasterRow(
+                        "Crypto",
+                        normalize_crypto_symbol(symbol),
+                        _clean_text(info.get("displayName") or info.get("name") or base),
+                        exchange_id,
+                        "USDT",
+                        market_type,
+                        _clean_text(info.get("id") or symbol),
+                        _clean_symbol(info.get("settle") or quote),
+                        _classify_asset(info),
+                    ))
+                rows.extend(context_rows)
+                contexts.append({
+                    "exchange": exchange_id,
+                    "market_type": market_type,
+                    "ok": True,
+                    "rows": len(context_rows),
+                })
+            except Exception as e:
+                logger.warning("crypto catalog unavailable exchange=%s type=%s: %s", exchange_id, market_type, e)
+                contexts.append({
+                    "exchange": exchange_id,
+                    "market_type": market_type,
+                    "ok": False,
+                    "rows": 0,
+                    "error": str(e),
+                })
+    return _unique_rows(rows), contexts
 
 
 def fetch_crypto_symbols() -> List[SymbolMasterRow]:
-    """Fetch active USDT crypto pairs from the configured CCXT exchange."""
-    import ccxt  # type: ignore
-    from app.config.data_sources import CCXTConfig
-
-    rows = _static_rows("Crypto")
-    try:
-        exchange_cls = getattr(ccxt, CCXTConfig.DEFAULT_EXCHANGE, None) or ccxt.binance
-        exchange = exchange_cls()
-        exchange.load_markets()
-        for symbol, info in exchange.markets.items():
-            if not info.get("active"):
-                continue
-            quote = _clean_symbol(info.get("quote"))
-            base = _clean_symbol(info.get("base"))
-            if quote != "USDT" or not base:
-                continue
-            canonical = normalize_crypto_symbol(symbol)
-            rows.append(SymbolMasterRow("Crypto", canonical, base, CCXTConfig.DEFAULT_EXCHANGE, "USDT"))
-    except Exception as e:
-        logger.warning("crypto symbol source unavailable, using static fallback: %s", e)
-    return _unique_rows(rows)
+    """Fetch all active USDT spot and swap instruments from six venues."""
+    rows, _ = fetch_crypto_symbols_with_diagnostics()
+    return rows
 
 
 def fetch_forex_symbols() -> List[SymbolMasterRow]:
@@ -323,24 +372,49 @@ def upsert_symbol_master(rows: Sequence[SymbolMasterRow]) -> int:
     with get_db_connection() as db:
         cur = db.cursor()
         count = 0
+        crypto_contexts = {
+            (row.exchange, row.market_type)
+            for row in rows
+            if row.market == "Crypto" and row.exchange
+        }
+        for exchange_id, market_type in crypto_contexts:
+            cur.execute(
+                "UPDATE qd_market_symbols SET is_active = 0 WHERE market = 'Crypto' AND exchange = ? AND market_type = ?",
+                (exchange_id, market_type),
+            )
         for row in rows:
+            asset_class = row.asset_class or _default_asset_class(row.market)
             cur.execute(
                 """
                 INSERT INTO qd_market_symbols
-                    (market, symbol, name, exchange, currency, is_active, is_hot, sort_order)
-                VALUES (?, ?, ?, ?, ?, 1, 0, 0)
-                ON CONFLICT (market, symbol) DO UPDATE
+                    (market, symbol, name, exchange, currency, market_type, instrument_id, settle_currency, asset_class,
+                     is_active, is_hot, sort_order)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 0)
+                ON CONFLICT (market, symbol, exchange, market_type, instrument_id) DO UPDATE
                   SET name = EXCLUDED.name,
                       exchange = COALESCE(NULLIF(EXCLUDED.exchange, ''), qd_market_symbols.exchange),
                       currency = COALESCE(NULLIF(EXCLUDED.currency, ''), qd_market_symbols.currency),
+                      settle_currency = COALESCE(NULLIF(EXCLUDED.settle_currency, ''), qd_market_symbols.settle_currency),
+                      asset_class = EXCLUDED.asset_class,
                       is_active = 1
                 """,
-                (row.market, row.symbol, row.name, row.exchange, row.currency),
+                (
+                    row.market, row.symbol, row.name, row.exchange, row.currency,
+                    row.market_type, row.instrument_id, row.settle_currency, asset_class,
+                ),
             )
             count += 1
         db.commit()
         cur.close()
         return count
+
+
+def _default_asset_class(market: str) -> str:
+    return {
+        "Crypto": "crypto",
+        "Forex": "forex",
+        "Futures": "futures",
+    }.get(str(market or ""), "equity")
 
 
 def sync_symbol_master(markets: Optional[Sequence[str]] = None) -> Dict[str, Dict[str, object]]:

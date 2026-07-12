@@ -1,7 +1,7 @@
 """
 Heuristic quality hints for QuantDinger indicator Python code.
 
-Read-only analysis: @strategy parsing, structure checks, risk/position sanity.
+Read-only analysis: chart indicator structure checks and common pandas pitfalls.
 Does not execute user code.
 """
 
@@ -10,28 +10,13 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List
 
-from app.services.indicator_params import IndicatorParamsParser, StrategyConfigParser
-
-_IGNORED_STRATEGY_KEYS = frozenset({"leverage"})
-
-
-def _has_df_buy_sell(code: str) -> bool:
-    c = code or ""
-    if re.search(r"df\s*\[\s*['\"]buy['\"]\s*\]", c):
-        return True
-    if re.search(r"df\s*\[\s*['\"]sell['\"]\s*\]", c):
-        return True
-    return False
-
-
-def _has_four_way_signals(code: str) -> bool:
-    c = code or ""
-    cols = ("open_long", "close_long", "open_short", "close_short")
-    return all(re.search(rf"df\s*\[\s*['\"]{col}['\"]\s*\]", c) for col in cols)
+from app.services.indicator_params import IndicatorParamsParser
 
 
 def _has_execution_signal_columns(code: str) -> bool:
-    return _has_four_way_signals(code)
+    c = code or ""
+    cols = ("open_long", "close_long", "open_short", "close_short", "add_long", "add_short", "reduce_long", "reduce_short")
+    return any(re.search(rf"df\s*\[\s*['\"]{col}['\"]\s*\]", c) for col in cols)
 
 
 def _has_output_dict(code: str) -> bool:
@@ -62,9 +47,75 @@ def _declared_param_names(code: str) -> List[str]:
     return names
 
 
-def _uses_params_get(code: str, name: str) -> bool:
-    pattern = rf"params\s*\.?\s*get\s*\(\s*['\"]{re.escape(name)}['\"]\s*,?"
-    return bool(re.search(pattern, code or ""))
+def _param_read_names(code: str) -> set[str]:
+    """Names read from `params`.
+
+    The IDE examples mostly use direct `params.get("name", default)`, but real
+    indicators often wrap that pattern in helpers such as:
+
+        def _param(name, default, cast):
+            return cast(params.get(name, default))
+        fast = _param("fast", 12, int)
+
+    Treat those simple wrappers as legitimate reads so the checker does not
+    force users into one exact spelling.
+    """
+    raw = code or ""
+    names: set[str] = set(re.findall(r"params\s*\.?\s*get\s*\(\s*['\"](\w+)['\"]\s*,?", raw))
+
+    try:
+        import ast
+
+        tree = ast.parse(raw)
+    except SyntaxError:
+        return names
+
+    helper_names: set[str] = set()
+
+    class HelperVisitor(ast.NodeVisitor):
+        def visit_FunctionDef(self, node):  # type: ignore[override]
+            arg_names = {arg.arg for arg in node.args.args}
+            if not arg_names:
+                return
+
+            class BodyVisitor(ast.NodeVisitor):
+                found = False
+
+                def visit_Call(self, call):  # type: ignore[override]
+                    func = call.func
+                    is_params_get = (
+                        isinstance(func, ast.Attribute)
+                        and func.attr == "get"
+                        and isinstance(func.value, ast.Name)
+                        and func.value.id == "params"
+                    )
+                    if is_params_get and call.args:
+                        first = call.args[0]
+                        if isinstance(first, ast.Name) and first.id in arg_names:
+                            self.found = True
+                    self.generic_visit(call)
+
+            body_visitor = BodyVisitor()
+            body_visitor.visit(node)
+            if body_visitor.found:
+                helper_names.add(node.name)
+            self.generic_visit(node)
+
+    HelperVisitor().visit(tree)
+    if not helper_names:
+        return names
+
+    class CallVisitor(ast.NodeVisitor):
+        def visit_Call(self, node):  # type: ignore[override]
+            func = node.func
+            if isinstance(func, ast.Name) and func.id in helper_names and node.args:
+                first = node.args[0]
+                if isinstance(first, ast.Constant) and isinstance(first.value, str):
+                    names.add(first.value)
+            self.generic_visit(node)
+
+    CallVisitor().visit(tree)
+    return names
 
 
 def _normalize_param_default(value: Any, param_type: str) -> Any:
@@ -151,7 +202,8 @@ def _param_default_mismatches(code: str) -> List[Dict[str, Any]]:
 
 
 def _uses_where_none_for_markers(code: str) -> bool:
-    return bool(re.search(r"\.where\s*\([^)]*,\s*None\s*\)\s*\.tolist\s*\(", code or ""))
+    raw = code or ""
+    return ".where" in raw and ", None" in raw and bool(re.search(r"\.tolist\s*\(", raw))
 
 
 # pandas-only methods that will AttributeError if invoked on a numpy ndarray.
@@ -344,14 +396,14 @@ def _future_data_leak(code: str) -> List[Dict[str, str]]:
     """
     Detect look-ahead bias / future data leakage in indicator code.
 
-    Three deterministic patterns (zero false positives on legit code):
-      1. `.shift(-N)` with literal negative integer (N>=1) — pulls future rows
+    Three deterministic patterns:
+      1. `.shift(-N)` with literal negative integer (N >= 1) pulls future rows
          into present. Only legit use is ML label-prep, never inside a trading
          signal indicator.
-      2. `.iloc[<var>+<int>]` — inside a loop iterating row indices, this fetches
+      2. `.iloc[<var>+<int>]` inside a loop iterating row indices fetches
          rows AFTER the current one. Allows trivial paper-trading "perfect
          strategies" that cannot exist live.
-      3. `bars_ago(-N)` — custom helper variant of the same anti-pattern.
+      3. `bars_ago(-N)` is a custom helper variant of the same anti-pattern.
 
     Notes:
       * `.shift(1)` (positive), `.shift()` (default 1), `.iloc[-1]` (last row),
@@ -380,18 +432,13 @@ def _future_data_leak(code: str) -> List[Dict[str, str]]:
     return findings
 
 
-def _unknown_strategy_keys(code: str) -> List[str]:
-    valid = set(StrategyConfigParser.VALID_KEYS.keys())
-    unknown: List[str] = []
-    for m in re.finditer(
-        r"^\s*#\s*@strategy\s+(\w+)\s+(\S+)", code or "", re.MULTILINE | re.IGNORECASE
-    ):
-        key = m.group(1)
-        if key not in valid:
-            if key in _IGNORED_STRATEGY_KEYS:
-                continue
-            unknown.append(key)
-    return unknown
+def _has_strategy_annotations(code: str) -> bool:
+    c = code or ""
+    if re.search(r"^\s*#\s*@strategy\s+\w+\s+\S+", c, re.MULTILINE | re.IGNORECASE):
+        return True
+    if re.search(r"^\s*#?\s*(signal_form|exit_owner|flip_mode|timeframe|kline_timeframe)\s*:", c, re.MULTILINE | re.IGNORECASE):
+        return True
+    return bool(re.search(r"\bfour_way\b|\bScriptStrategy\b", c, re.IGNORECASE))
 
 
 def analyze_indicator_code_quality(code: str) -> List[Dict[str, Any]]:
@@ -416,12 +463,15 @@ def analyze_indicator_code_quality(code: str) -> List[Dict[str, Any]]:
     if not _has_output_dict(raw):
         hints.append({"severity": "error", "code": "MISSING_OUTPUT", "params": {}})
 
-    if not _has_execution_signal_columns(raw):
-        hints.append({"severity": "warn", "code": "MISSING_BUY_SELL_COLUMNS", "params": {}})
+    if _has_execution_signal_columns(raw):
+        hints.append({"severity": "error", "code": "EXECUTION_COLUMNS_IGNORED_FOR_INDICATOR", "params": {}})
+    if _has_strategy_annotations(raw):
+        hints.append({"severity": "error", "code": "STRATEGY_ANNOTATIONS_IGNORED_FOR_INDICATOR", "params": {}})
 
     declared_params = _declared_param_names(raw)
     if declared_params:
-        unread = [name for name in declared_params if not _uses_params_get(raw, name)]
+        read_param_names = _param_read_names(raw)
+        unread = [name for name in declared_params if name not in read_param_names]
         if unread:
             hints.append(
                 {
@@ -485,76 +535,6 @@ def analyze_indicator_code_quality(code: str) -> List[Dict[str, Any]]:
                 },
             }
         )
-
-    for bad_key in _unknown_strategy_keys(raw):
-        hints.append(
-            {
-                "severity": "warn",
-                "code": "UNKNOWN_STRATEGY_KEY",
-                "params": {"key": bad_key},
-            }
-        )
-
-    cfg = StrategyConfigParser.parse(raw)
-
-    trading = _has_execution_signal_columns(raw)
-    if trading:
-        if not cfg:
-            hints.append(
-                {
-                    "severity": "info",
-                    "code": "NO_STRATEGY_ANNOTATIONS",
-                    "params": {},
-                }
-            )
-        else:
-            slp = cfg.get("stopLossPct")
-            tpp = cfg.get("takeProfitPct")
-            if slp is None and tpp is None:
-                hints.append(
-                    {
-                        "severity": "warn",
-                        "code": "NO_STOP_AND_TAKE_PROFIT",
-                        "params": {},
-                    }
-                )
-            elif slp is None:
-                hints.append(
-                    {"severity": "info", "code": "NO_STOP_LOSS", "params": {}}
-                )
-            elif tpp is None:
-                hints.append(
-                    {"severity": "info", "code": "NO_TAKE_PROFIT", "params": {}}
-                )
-            elif slp == 0 and tpp == 0:
-                hints.append(
-                    {
-                        "severity": "info",
-                        "code": "ZERO_STOP_AND_TAKE_PROFIT",
-                        "params": {},
-                    }
-                )
-
-            ep = cfg.get("entryPct")
-            if ep is not None:
-                if ep < 0.15:
-                    hints.append(
-                        {
-                            "severity": "warn",
-                            "code": "ENTRY_PCT_VERY_LOW",
-                            "params": {"pct": f"{ep * 100:.1f}"},
-                        }
-                    )
-            if cfg.get("trailingEnabled"):
-                tpct = cfg.get("trailingStopPct")
-                if tpct is None or tpct == 0:
-                    hints.append(
-                        {
-                            "severity": "warn",
-                            "code": "TRAILING_NO_PCT",
-                            "params": {},
-                        }
-                    )
 
     # Optional: obviously empty visualization (starter template style)
     if re.search(r"['\"]plots['\"]\s*:\s*\[\s*\]", raw) and re.search(

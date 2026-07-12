@@ -1,1 +1,2 @@
 # Windows-specific optional dependencies.
+pytest>=8.0,<9

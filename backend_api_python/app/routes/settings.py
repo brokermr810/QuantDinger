@@ -688,7 +688,7 @@ CONFIG_SCHEMA = {
                 'default': 'binance',
                 'link': 'https://github.com/ccxt/ccxt#supported-cryptocurrency-exchange-markets',
                 'link_text': 'settings.link.supportedExchanges',
-                'description': 'Default exchange for crypto market data (binance recommended for BTC/USDT; coinbase uses USD pairs)'
+                'description': 'Default crypto market-data exchange: binance, bitget, bybit, okx, gate, or htx'
             },
             {
                 'key': 'FINNHUB_API_KEY',
@@ -1610,7 +1610,7 @@ CONFIG_SCHEMA = {
                 'label': 'AI Analysis Cost (per symbol)',
                 'type': 'number',
                 'default': '10',
-                'description': 'Credits per symbol (instant analysis, AI filter, scheduled tasks all use this price)'
+                'description': 'Credits per symbol (instant analysis and scheduled tasks use this price)'
             },
             {
                 'key': 'BILLING_COST_AI_CODE_GEN',
@@ -1618,6 +1618,13 @@ CONFIG_SCHEMA = {
                 'type': 'number',
                 'default': '30',
                 'description': 'Credits per AI strategy/indicator code generation (higher token usage)'
+            },
+            {
+                'key': 'BILLING_COST_AI_INDICATOR_TO_STRATEGY',
+                'label': 'AI Indicator-to-Strategy Cost',
+                'type': 'number',
+                'default': '30',
+                'description': 'Credits per AI conversion from a chart-only indicator into an executable script strategy'
             },
             {
                 'key': 'BILLING_COST_AI_TUNING',
@@ -1646,6 +1653,13 @@ CONFIG_SCHEMA = {
                 'type': 'number',
                 'default': '20',
                 'description': 'Credits per AI opportunity radar / market scan request'
+            },
+            {
+                'key': 'MARKETPLACE_PLATFORM_FEE_RATE',
+                'label': 'Marketplace Platform Fee Rate',
+                'type': 'text',
+                'default': '0',
+                'description': 'Platform commission deducted from paid market purchases before crediting the seller. Accepts ratio values like 0.1 or percent strings like 10%.'
             },
             {
                 'key': 'CREDITS_REGISTER_BONUS',
@@ -1729,7 +1743,7 @@ def get_brand_config():
 @login_required
 @admin_required
 def get_settings_values():
-    """Return current settings values including secrets (admin only)."""
+    """Return current settings values without exposing stored secrets."""
     env_values = read_env_file()
     
     result = {}
@@ -1737,16 +1751,55 @@ def get_settings_values():
         result[group_key] = {}
         for item in group['items']:
             key = item['key']
-            value = env_values.get(key, item.get('default', ''))
-            result[group_key][key] = value
             if item['type'] == 'password':
+                value = env_values.get(key, '')
+                result[group_key][key] = ''
                 result[group_key][f'{key}_configured'] = bool(value)
+            else:
+                result[group_key][key] = env_values.get(key, item.get('default', ''))
     
     return jsonify({
         'code': 1,
         'msg': 'success',
         'data': result
     })
+
+
+@settings_blp.route('/market-catalog', methods=['GET'])
+@login_required
+@admin_required
+def get_market_catalog():
+    """Return market catalog coverage and the latest synchronization state."""
+    try:
+        from app.services.market_catalog_sync import get_market_catalog_overview
+        return jsonify({
+            'code': 1,
+            'msg': 'success',
+            'data': get_market_catalog_overview(),
+        })
+    except Exception as exc:
+        logger.error("Failed to load market catalog overview: %s", exc, exc_info=True)
+        return jsonify({'code': 0, 'msg': str(exc)}), 500
+
+
+@settings_blp.route('/market-catalog/sync', methods=['POST'])
+@login_required
+@admin_required
+def sync_market_catalog():
+    """Start a non-blocking full sync for the supported crypto venues."""
+    try:
+        from app.services.market_catalog_sync import start_market_catalog_sync
+        result = start_market_catalog_sync('manual')
+        if not result.get('started'):
+            return jsonify({
+                'code': 0,
+                'msg': result.get('reason', 'already_running'),
+                'data': result,
+            }), 409
+        return jsonify({'code': 1, 'msg': 'started', 'data': result}), 202
+    except Exception as exc:
+        logger.error("Failed to start market catalog sync: %s", exc, exc_info=True)
+        return jsonify({'code': 0, 'msg': str(exc)}), 500
 
 
 @settings_blp.route('/save', methods=['POST'])

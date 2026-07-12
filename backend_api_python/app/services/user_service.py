@@ -43,11 +43,14 @@ def _seed_default_watchlist(db, user_id: int):
     for market, symbol, name in _DEFAULT_WATCHLIST:
         cur.execute(
             """
-            INSERT INTO qd_watchlist (user_id, market, symbol, name, created_at, updated_at)
-            VALUES (?, ?, ?, ?, NOW(), NOW())
-            ON CONFLICT (user_id, market, symbol) DO NOTHING
+            INSERT INTO qd_watchlist (
+                user_id, market, symbol, name, exchange_id, market_type,
+                instrument_id, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, '', NOW(), NOW())
+            ON CONFLICT (user_id, market, symbol, exchange_id, market_type, instrument_id) DO NOTHING
             """,
-            (user_id, market, symbol, name),
+            (user_id, market, symbol, name, "", "spot"),
         )
     db.commit()
     cur.close()

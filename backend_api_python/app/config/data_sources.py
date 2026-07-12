@@ -69,9 +69,11 @@ class MetaFinnhubConfig(type):
 
     @property
     def FREE_ONLY(cls):
-        value = _addon('finnhub', 'free_only')
+        value = os.getenv('FINNHUB_FREE_ONLY')
         if value is None:
-            value = os.getenv('FINNHUB_FREE_ONLY', 'true')
+            value = _addon('finnhub', 'free_only')
+        if value is None:
+            value = 'true'
         return str(value).strip().lower() not in ('0', 'false', 'no', 'off')
 
 

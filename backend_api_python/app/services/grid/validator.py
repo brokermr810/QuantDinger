@@ -65,6 +65,22 @@ def validate_grid_config(
             "Widen the price range, reduce gridCount, or lower fee settings.",
             warnings,
         )
+    min_spread = float(cfg.min_spread_between_orders or 0.0)
+    if min_spread > 0:
+        for cell in cells:
+            lo = float(cell.lower_price or 0.0)
+            hi = float(cell.upper_price or 0.0)
+            if lo <= 0 or hi <= lo:
+                continue
+            cell_spread = (hi - lo) / lo
+            if cell_spread < min_spread:
+                return (
+                    False,
+                    "Grid spacing is below minSpreadBetweenOrders: "
+                    f"cell [{lo:.4f}, {hi:.4f}] is {cell_spread * 100:.3f}% "
+                    f"but requires at least {min_spread * 100:.3f}%.",
+                    warnings,
+                )
 
     if initial_capital > 0 and cfg.initial_position_pct > 0:
         init_usdt = initial_capital * cfg.initial_position_pct

@@ -63,48 +63,62 @@ def get_indicator_authoring_contract() -> Dict[str, Any]:
     """Machine-readable contract + starter template for external AI agents."""
     template = build_default_indicator_template()
     return {
-        "version": "indicator-contract-v1",
-        "doc": "docs/SIGNAL_EXECUTION_STANDARD_CN.md",
+        "version": "indicator-contract-v2-chart-only",
+        "doc": "docs/INDICATOR_DEV_GUIDE_CN.md",
         "workflow": [
             "1. Call this contract (or MCP get_indicator_authoring_contract) before writing code.",
-            "2. Write full Python indicator script (not natural language) following required_fields.",
+            "2. Write a full Python chart-only indicator script (not natural language) following required_fields.",
             "3. POST /api/agent/v1/indicators/validate to check sandbox + output contract.",
             "4. POST /api/agent/v1/indicators to save into the user's indicator library (scope W).",
-            "5. POST /api/agent/v1/strategies with indicator_id OR indicator_code; "
-            "indicator_code is auto-saved to the library when missing indicator_id.",
-            "6. POST /api/agent/v1/backtests with the same code to preview performance.",
+            "5. If the user wants backtest/live trading, use the separate Indicator-to-Strategy workflow to convert visible indicator logic into a ScriptStrategy. Do not add execution behavior to indicator code.",
         ],
         "required_fields": {
             "globals": ["my_indicator_name", "my_indicator_description"],
-            "dataframe": "df = df.copy() at start",
-            "signals": [
-                "df['open_long']", "df['close_long']",
-                "df['open_short']", "df['close_short']",
-            ],
-            "output": "output = {'name', 'plots', 'signals'} with list lengths == len(df)",
-            "params": "every # @param must be read via params.get('name', default)",
-            "strategy_annotations": "# @strategy entryPct 1  (0-1 ratio, 1 = 100%)",
+            "dataframe": "Use df = df.copy() before computations/mutations. Expected columns: open, high, low, close, volume.",
+            "output": "output = {'name', 'plots', 'signals', 'layers'}; every plot['data'] and signal['data'] length must equal len(df).",
+            "plots": "Each plot has name, data, color, overlay; use overlay=True for price-scale lines and overlay=False for oscillators/lamp panels.",
+            "signals": "Chart markers only. Prefer one-bar edge/transition events, not continuous state markers, so notifications do not repeat every bar.",
+            "layers": "Optional sparse zones/lines/labels only when explicitly useful; default [] for normal indicators.",
+            "params": "Declare knobs with # @param name type default label and read each via params.get('name', default) with matching fallback.",
+            "calculatedVars": "Optional JSON-safe diagnostics for the UI; never required for rendering.",
         },
         "forbidden": [
-            "Natural language in backtest `code` field",
-            "import os/sys/requests/subprocess",
+            "Execution/order columns: open_long, close_long, open_short, close_short, add_long, add_short, reduce_long, reduce_short",
+            "# @strategy, # signal_form, # exit_owner, # flip_mode, # timeframe, risk, leverage, trade direction, stop loss, take profit, trailing stop",
+            "ScriptStrategy / on_bar(ctx, bar) / live-trading handlers",
+            "Backtest or broker/account configuration inside indicator code",
+            "Natural language instead of Python source",
+            "import os/sys/requests/socket/subprocess/threading/sqlite3/multiprocessing",
             "Chaining .rolling/.shift on np.where output without pd.Series(..., index=df.index)",
             "Using legacy df['buy']/df['sell'] for newly generated code",
         ],
         "starter_template": template,
-        "minimal_backtest_snippet": (
-            "my_indicator_name = \"Agent SMA\"\n"
-            "my_indicator_description = \"SMA crossover\"\n"
+        "minimal_indicator_snippet": (
+            "my_indicator_name = \"Agent EMA Viewer\"\n"
+            "my_indicator_description = \"Chart-only EMA crossover viewer.\"\n"
+            "# @param fast_len int 12 Fast EMA period\n"
+            "# @param slow_len int 26 Slow EMA period\n"
             "df = df.copy()\n"
-            "fast = close.rolling(10).mean()\n"
-            "slow = close.rolling(30).mean()\n"
+            "fast_len = int(params.get('fast_len', 12))\n"
+            "slow_len = int(params.get('slow_len', 26))\n"
+            "fast = df['close'].ewm(span=fast_len, adjust=False).mean()\n"
+            "slow = df['close'].ewm(span=slow_len, adjust=False).mean()\n"
             "cross_up = (fast > slow) & (fast.shift(1) <= slow.shift(1))\n"
             "cross_dn = (fast < slow) & (fast.shift(1) >= slow.shift(1))\n"
-            "df['open_long'] = cross_up.fillna(False).astype(bool)\n"
-            "df['close_long'] = cross_dn.fillna(False).astype(bool)\n"
-            "df['open_short'] = False\n"
-            "df['close_short'] = False\n"
-            "output = {'name': my_indicator_name, 'plots': [], 'signals': []}\n"
+            "buy_marks = [float(df['low'].iloc[i] * 0.995) if bool(cross_up.iloc[i]) else None for i in range(len(df))]\n"
+            "sell_marks = [float(df['high'].iloc[i] * 1.005) if bool(cross_dn.iloc[i]) else None for i in range(len(df))]\n"
+            "output = {\n"
+            "    'name': my_indicator_name,\n"
+            "    'plots': [\n"
+            "        {'name': 'EMA Fast', 'data': fast.tolist(), 'color': '#ffb020', 'overlay': True},\n"
+            "        {'name': 'EMA Slow', 'data': slow.tolist(), 'color': '#2d8cff', 'overlay': True},\n"
+            "    ],\n"
+            "    'signals': [\n"
+            "        {'type': 'buy', 'text': 'Cross Up', 'color': '#22c55e', 'data': buy_marks},\n"
+            "        {'type': 'sell', 'text': 'Cross Down', 'color': '#ef4444', 'data': sell_marks},\n"
+            "    ],\n"
+            "    'layers': [],\n"
+            "}\n"
         ),
     }
 

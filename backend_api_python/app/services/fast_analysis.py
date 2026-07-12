@@ -1144,18 +1144,20 @@ IMPORTANT:
                 analysis["confidence"] = consensus_conf
                 original_summary = analysis.get("summary", "")
                 is_zh = str(language or "").lower().startswith("zh")
+                zh_outlook = {"BUY": "利多", "SELL": "利空", "HOLD": "中性"}.get(final_decision, "中性")
+                en_outlook = {"BUY": "bullish", "SELL": "bearish", "HOLD": "neutral"}.get(final_decision, "neutral")
                 if is_zh:
                     level = "强烈" if consensus_abs >= 70 else "明显" if consensus_abs >= 40 else "轻微"
                     bias = "利多" if consensus_score > 0 else "利空"
                     consensus_note = (
-                        f"[多周期客观共识：综合评分{consensus_score:.1f}分（{level}{bias}），建议{final_decision}]"
+                        f"[多周期客观共识：综合评分{consensus_score:.1f}分（{level}{bias}），AI倾向{zh_outlook}]"
                     )
                 else:
                     level = "strong" if consensus_abs >= 70 else "moderate" if consensus_abs >= 40 else "mild"
                     bias = "bullish" if consensus_score > 0 else "bearish"
                     consensus_note = (
                         f"[Multi-timeframe objective consensus: score {consensus_score:.1f} "
-                        f"({level} {bias}), suggested decision {final_decision}]"
+                        f"({level} {bias}), AI outlook {en_outlook}]"
                     )
                 analysis["summary"] = f"{original_summary} {consensus_note}".strip()
             else:

@@ -35,14 +35,7 @@ def _build_broker_markets() -> Dict[str, Dict[str, Set[str]]]:
     matrix: Dict[str, Dict[str, Set[str]]] = {
         # US stocks via Interactive Brokers (TWS/Gateway, local desktop only)
         "ibkr": {"USStock": {"spot"}},
-        # Alpaca: REST broker for US equities + crypto.
-        # Crypto is *spot only* on Alpaca - they have no perpetual / margin
-        # crypto product, so a 'swap' market_type is impossible regardless of
-        # what we implement.
-        "alpaca": {
-            "USStock": {"spot"},
-            "Crypto": {"spot"},
-        },
+        "alpaca": {"USStock": {"spot"}},
     }
     for ex, capability in CRYPTO_VENUE_CAPABILITIES.items():
         matrix[ex] = {"Crypto": set(capability.market_types)}
@@ -220,14 +213,6 @@ def validate_strategy_config(
     if mc and mt:
         allowed_mts = allowed_market_types(ex, mc)
         if mt not in allowed_mts:
-            # Special-case the most common confusion so the error is helpful.
-            if ex == "alpaca" and mc == "Crypto" and mt == "swap":
-                raise ValueError(
-                    "Alpaca crypto desk is spot-only (no perpetual / margin "
-                    "product). Got market_type='swap'. Set market_type='spot', "
-                    "or to trade crypto perpetuals use Binance/OKX/Bybit/"
-                    "Bitget with market_type='swap'."
-                )
             raise ValueError(
                 f"{ex.upper()} + {mc} does not support market_type='{mt}'. "
                 f"Allowed: {sorted(allowed_mts)}."

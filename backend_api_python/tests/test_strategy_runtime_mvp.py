@@ -1,10 +1,10 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 
 import pandas as pd
 
-from app.services.backtest import BacktestService
+from app.services.unified_backtest import UnifiedBacktestService
 from app.services.strategy_runtime.order_intents import OrderIntent, OrderIntentService
 from app.services.strategy_runtime.state import RuntimeStateProxy
 from app.services.strategy_script_runtime import StrategyScriptContext
@@ -13,6 +13,40 @@ from app.services.trading_executor import TradingExecutor
 
 def _make_executor() -> TradingExecutor:
     return TradingExecutor.__new__(TradingExecutor)
+
+
+def _run_script_with_df(
+    monkeypatch,
+    df: pd.DataFrame,
+    code: str,
+    *,
+    trade_direction: str = "long",
+    leverage: int = 1,
+    strategy_config: dict | None = None,
+    start_date=None,
+    end_date=None,
+):
+    config = strategy_config or {"market_type": "swap"}
+
+    def fake_fetch(self, *args, **kwargs):
+        return df
+
+    monkeypatch.setattr(UnifiedBacktestService, "_fetch_kline_data", fake_fetch)
+    return UnifiedBacktestService()._run_script_strategy(
+        code=code,
+        market="Crypto",
+        symbol="BTC/USDT",
+        timeframe=str(df.attrs.get("timeframe") or "15m"),
+        start_date=pd.Timestamp(start_date if start_date is not None else df.index[0]).to_pydatetime(),
+        end_date=pd.Timestamp(end_date if end_date is not None else df.index[-1]).to_pydatetime(),
+        initial_capital=1000,
+        commission=0,
+        slippage=0,
+        leverage=leverage,
+        trade_direction=trade_direction,
+        strategy_config=config,
+        market_type=str(config.get("market_type") or "swap"),
+    )
 
 
 @dataclass
@@ -75,7 +109,7 @@ def test_ctx_basket_open_child_order_emits_script_order(monkeypatch):
     ctx = StrategyScriptContext(
         pd.DataFrame({"close": [100.0]}),
         1000.0,
-        strategy_id=0,
+        strategy_id=1,
         strategy_run_id=77,
         symbol="BTC/USDT",
     )
@@ -206,11 +240,6 @@ def test_script_order_runtime_metadata_survives_signal_conversion():
 
 
 def test_script_backtest_user_direction_is_outer_gate(monkeypatch):
-    def fake_create_intent(self, **kwargs):
-        return OrderIntent(id=123, idempotency_key=kwargs["idempotency_key"], status="intent_created")
-
-    monkeypatch.setattr(OrderIntentService, "create_intent", fake_create_intent)
-
     df = pd.DataFrame(
         {
             "open": [100.0, 100.0],
@@ -221,6 +250,7 @@ def test_script_backtest_user_direction_is_outer_gate(monkeypatch):
         },
         index=pd.date_range("2026-06-01", periods=2, freq="15min"),
     )
+    df.attrs["timeframe"] = "15m"
     code = """
 def on_bar(ctx, bar):
     if int(ctx.current_index) == 0:
@@ -232,31 +262,25 @@ def on_bar(ctx, bar):
             action='open',
         )
 """
-    svc = BacktestService()
-    signals = svc._execute_script_strategy(
-        code,
+    result = _run_script_with_df(
+        monkeypatch,
         df,
-        {
-            "initial_capital": 1000,
-            "leverage": 2,
-            "trade_direction": "short",
-            "strategy_config": {
-                "market_type": "swap",
-                "script_template_params": {"direction": "long"},
-            },
+        code,
+        trade_direction="short",
+        leverage=2,
+        strategy_config={
+            "market_type": "swap",
+            "script_template_params": {"direction": "long"},
         },
     )
 
-    assert int(signals["open_long"].sum()) == 0
-    assert float(signals["open_long_quote_amount"].sum()) == 0.0
+    assert result["totalTrades"] == 0
+    assert result["signalDiagnostics"]["entrySignals"] == 0
+    engine = result["engine"]
+    assert engine["orderCount"] == 0
 
 
 def test_script_backtest_basket_quote_amount_sizes_trade(monkeypatch):
-    def fake_create_intent(self, **kwargs):
-        return OrderIntent(id=123, idempotency_key=kwargs["idempotency_key"], status="intent_created")
-
-    monkeypatch.setattr(OrderIntentService, "create_intent", fake_create_intent)
-
     df = pd.DataFrame(
         {
             "open": [100.0, 100.0, 110.0],
@@ -267,6 +291,7 @@ def test_script_backtest_basket_quote_amount_sizes_trade(monkeypatch):
         },
         index=pd.date_range("2026-06-01", periods=3, freq="15min"),
     )
+    df.attrs["timeframe"] = "15m"
     code = """
 def on_bar(ctx, bar):
     if int(ctx.current_index) == 0:
@@ -278,27 +303,60 @@ def on_bar(ctx, bar):
             action='open',
         )
 """
-    svc = BacktestService()
-    signals = svc._execute_script_strategy(
+    result = _run_script_with_df(
+        monkeypatch,
+        df,
         code,
-        df,
-        {
-            "initial_capital": 1000,
-            "leverage": 2,
-            "trade_direction": "long",
-            "strategy_config": {"market_type": "swap"},
-        },
-    )
-    _, trades, _ = svc._simulate_trading(
-        df,
-        signals,
-        1000,
-        0,
-        0,
-        2,
-        "long",
-        {"market_type": "swap"},
+        trade_direction="long",
+        leverage=2,
+        strategy_config={"market_type": "swap"},
     )
 
+    trades = result["trades"]
     assert trades[0]["type"] == "open_long"
     assert trades[0]["amount"] == 1.0
+
+
+def test_script_backtest_warmup_does_not_carry_trade_position(monkeypatch):
+    df = pd.DataFrame(
+        {
+            "open": [100.0, 100.0, 100.0, 100.0, 100.0],
+            "high": [102.0, 102.0, 102.0, 102.0, 102.0],
+            "low": [98.0, 98.0, 98.0, 98.0, 98.0],
+            "close": [101.0, 101.0, 99.0, 101.0, 101.0],
+            "volume": [1.0, 1.0, 1.0, 1.0, 1.0],
+        },
+        index=pd.date_range("2026-06-01", periods=5, freq="1D"),
+    )
+    df.attrs["timeframe"] = "1D"
+    code = """
+def on_bar(ctx, bar):
+    if bar['close'] > 100 and not ctx.position.has_long():
+        ctx.basket('long').open_child_order(
+            layer=1,
+            order=1,
+            notional=50,
+            price=bar['close'],
+            action='open',
+        )
+    elif bar['close'] < 100 and ctx.position.has_long():
+        ctx.basket('long').open_child_order(
+            layer=1,
+            order=2,
+            price=bar['close'],
+            action='close',
+        )
+"""
+    result = _run_script_with_df(
+        monkeypatch,
+        df,
+        code,
+        trade_direction="long",
+        leverage=1,
+        strategy_config={"market_type": "swap"},
+        start_date=df.index[2],
+    )
+
+    assert result["signalDiagnostics"]["entrySignals"] == 1
+    assert result["orders"][0]["submittedBar"] == 4
+    assert result["trades"][0]["type"] == "open_long"

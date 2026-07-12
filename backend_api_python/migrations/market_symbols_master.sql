@@ -327,7 +327,7 @@ INSERT INTO qd_market_symbols (market, symbol, name, exchange, currency, is_acti
   ('CNStock', '000850', '华茂股份', 'CN', 'CNY', 1, 0, 0),
   ('CNStock', '000852', '石化机械', 'CN', 'CNY', 1, 0, 0),
   ('CNStock', '000856', '冀东装备', 'CN', 'CNY', 1, 0, 0),
-  ('CNStock', '000858', '五 粮 液', 'CN', 'CNY', 1, 0, 0),
+  ('CNStock', '000858', '五粮液', 'CN', 'CNY', 1, 0, 0),
   ('CNStock', '000859', '国风新材', 'CN', 'CNY', 1, 0, 0),
   ('CNStock', '000860', '顺鑫农业', 'CN', 'CNY', 1, 0, 0),
   ('CNStock', '000862', '银星能源', 'CN', 'CNY', 1, 0, 0),
@@ -3281,7 +3281,7 @@ INSERT INTO qd_market_symbols (market, symbol, name, exchange, currency, is_acti
   ('CNStock', '600516', 'XD方大炭', 'CN', 'CNY', 1, 0, 0),
   ('CNStock', '600517', '国网英大', 'CN', 'CNY', 1, 0, 0),
   ('CNStock', '600518', '康美药业', 'CN', 'CNY', 1, 0, 0),
-  ('CNStock', '600519', 'XD贵州茅', 'CN', 'CNY', 1, 0, 0),
+  ('CNStock', '600519', '贵州茅台', 'CN', 'CNY', 1, 0, 0),
   ('CNStock', '600520', '三佳科技', 'CN', 'CNY', 1, 0, 0),
   ('CNStock', '600521', '华海药业', 'CN', 'CNY', 1, 0, 0),
   ('CNStock', '600522', '中天科技', 'CN', 'CNY', 1, 0, 0),
@@ -3848,7 +3848,7 @@ INSERT INTO qd_market_symbols (market, symbol, name, exchange, currency, is_acti
   ('CNStock', '601888', '中国中免', 'CN', 'CNY', 1, 0, 0),
   ('CNStock', '601890', '亚星锚链', 'CN', 'CNY', 1, 0, 0),
   ('CNStock', '601898', '中煤能源', 'CN', 'CNY', 1, 0, 0),
-  ('CNStock', '601899', 'XD紫金矿', 'CN', 'CNY', 1, 0, 0),
+  ('CNStock', '601899', '紫金矿业', 'CN', 'CNY', 1, 0, 0),
   ('CNStock', '601900', '南方传媒', 'CN', 'CNY', 1, 0, 0),
   ('CNStock', '601901', '方正证券', 'CN', 'CNY', 1, 0, 0),
   ('CNStock', '601908', '京运通', 'CN', 'CNY', 1, 0, 0),
@@ -22167,7 +22167,7 @@ INSERT INTO qd_market_symbols (market, symbol, name, exchange, currency, is_acti
   ('USStock', 'ZWS', 'Zurn Elkay Water Solutions Corporation Common Stock', 'NYSE', 'USD', 1, 0, 0),
   ('USStock', 'ZYBT', 'Zhengye Biotechnology Holding Limited - Class A Ordinary Shares', 'NASDAQ', 'USD', 1, 0, 0),
   ('USStock', 'ZYME', 'Zymeworks Inc. - Common Stock', 'NASDAQ', 'USD', 1, 0, 0)
-ON CONFLICT (market, symbol) DO UPDATE
+ON CONFLICT (market, symbol, exchange, market_type, instrument_id) DO UPDATE
   SET name = EXCLUDED.name,
       exchange = COALESCE(NULLIF(EXCLUDED.exchange, ''), qd_market_symbols.exchange),
       currency = COALESCE(NULLIF(EXCLUDED.currency, ''), qd_market_symbols.currency),

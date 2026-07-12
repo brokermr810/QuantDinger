@@ -123,15 +123,6 @@ def strategy_allowed_symbols(strategy_config: Dict[str, Any]) -> Set[str]:
         if norm:
             allowed.add(norm.upper())
 
-    for sym in trading_config.get("symbol_list") or []:
-        if not sym or not isinstance(sym, str):
-            continue
-        bare = sym.strip()
-        if ":" in bare:
-            bare = bare.split(":", 1)[-1]
-        norm = normalize_strategy_symbol(bare)
-        if norm:
-            allowed.add(norm.upper())
     return allowed
 
 

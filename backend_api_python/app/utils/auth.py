@@ -59,9 +59,10 @@ def generate_token(user_id: int, username: str, role: str = 'user', token_versio
     """
     try:
         _configure_jwt_secret_warnings()
+        now = datetime.datetime.now(datetime.UTC)
         payload = {
-            'exp': datetime.datetime.utcnow() + datetime.timedelta(days=7),
-            'iat': datetime.datetime.utcnow(),
+            'exp': now + datetime.timedelta(days=7),
+            'iat': now,
             'sub': username,
             'user_id': user_id,
             'role': role,

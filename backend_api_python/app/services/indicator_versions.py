@@ -117,7 +117,7 @@ def restore_version(user_id: int, version_id: int, now_ts: int) -> dict | None:
             SELECT v.indicator_id, v.name, v.description, v.code
             FROM qd_indicator_code_versions v
             JOIN qd_indicator_codes i ON i.id = v.indicator_id
-            WHERE v.id = ? AND v.user_id = ? AND i.user_id = ? AND (i.is_buy IS NULL OR i.is_buy = 0)
+            WHERE v.id = ? AND v.user_id = ? AND i.user_id = ?
             """,
             (version_id, user_id, user_id),
         )
@@ -134,7 +134,7 @@ def restore_version(user_id: int, version_id: int, now_ts: int) -> dict | None:
             """
             UPDATE qd_indicator_codes
             SET name = ?, description = ?, code = ?, updatetime = ?, updated_at = NOW()
-            WHERE id = ? AND user_id = ? AND (is_buy IS NULL OR is_buy = 0)
+            WHERE id = ? AND user_id = ?
             """,
             (name, description, code, now_ts, indicator_id, user_id),
         )

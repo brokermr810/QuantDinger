@@ -1,4 +1,4 @@
-"""Tests for experiment orchestration services."""
+﻿"""Tests for experiment orchestration services."""
 
 from datetime import datetime
 
@@ -90,7 +90,7 @@ def test_evolution_builds_variants_from_parameter_space():
 def test_evolution_sweeps_indicator_level_params():
     """Regression: `indicator_params.atr_period` style keys must reach
     `snapshot['indicator_params']['atr_period']`, otherwise the structured
-    tuner cannot drive multi-param indicators (RSI/MACD/EMA/ATR etc.) — only
+    tuner cannot drive multi-param indicators (RSI/MACD/EMA/ATR etc.), only
     risk/leverage. Covers the P1 frontend auto-inference path that emits
     `indicator_params.<name>` for every @param the user writes."""
     service = StrategyEvolutionService()
@@ -118,7 +118,7 @@ def test_evolution_sweeps_indicator_level_params():
         assert 'indicator_params.atr_period' in v['overrides']
         assert 'indicator_params.multiplier' in v['overrides']
 
-    # Distinct (atr_period, multiplier, leverage) combos must appear — verifies
+    # Distinct (atr_period, multiplier, leverage) combos must appear, verifying
     # the Cartesian product is shuffled rather than collapsed onto one corner.
     combos = {(v['overrides']['indicator_params.atr_period'],
                v['overrides']['indicator_params.multiplier'],

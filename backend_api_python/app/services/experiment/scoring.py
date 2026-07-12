@@ -101,6 +101,30 @@ class StrategyScoringService:
             'sampleSizeScore': self._bounded_score(total_trades, floor=5.0, ceiling=80.0),
         }
 
+        if total_trades <= 0:
+            components.update({
+                'returnScore': 0.0,
+                'annualReturnScore': 0.0,
+                'sharpeScore': 0.0,
+                'profitFactorScore': 0.0,
+                'winRateScore': 0.0,
+                'sampleSizeScore': 0.0,
+                'regimeFitScore': 0.0,
+            })
+            return {
+                'overallScore': 0.0,
+                'grade': 'E',
+                'components': {key: round(value, 2) for key, value in components.items()},
+                'summary': {
+                    'totalTrades': 0,
+                    'riskAdjustedReturn': 0.0,
+                    'consistency': 0.0,
+                    'noTrade': True,
+                    'note': 'No trades were generated; this candidate is not eligible as a best parameter set.',
+                },
+                'weights': self.resolve_weights(regime),
+            }
+
         regime_fit = 50.0
         if regime:
             regime_fit = self._estimate_regime_fit(regime, components)
@@ -117,8 +141,10 @@ class StrategyScoringService:
             components['stabilityScore'] * weights['stability']
         )
 
-        if total_trades < 5:
-            weighted -= 12.0
+        if total_trades < 3:
+            weighted -= 24.0
+        elif total_trades < 5:
+            weighted -= 14.0
         elif total_trades < 12:
             weighted -= 5.0
 
@@ -138,7 +164,25 @@ class StrategyScoringService:
 
     def rank_results(self, items: Iterable[Dict[str, Any]]) -> List[Dict[str, Any]]:
         ranked = list(items)
-        ranked.sort(key=lambda item: float(((item.get('score') or {}).get('overallScore')) or 0.0), reverse=True)
+
+        def sort_key(item: Dict[str, Any]) -> tuple:
+            score = float(((item.get('score') or {}).get('overallScore')) or 0.0)
+            result = item.get('result') or {}
+            trades = int(self._as_float(result.get('totalTrades')))
+            total_return = self._as_float(result.get('totalReturn'))
+            max_drawdown = abs(self._as_float(result.get('maxDrawdown')))
+            has_overrides = 1 if (item.get('overrides') or {}) else 0
+            non_baseline = 0 if str(item.get('source') or '').lower() == 'baseline' else 1
+            return (
+                score,
+                min(trades, 1000),
+                non_baseline,
+                has_overrides,
+                total_return,
+                -max_drawdown,
+            )
+
+        ranked.sort(key=sort_key, reverse=True)
         for idx, item in enumerate(ranked, start=1):
             item['rank'] = idx
         return ranked

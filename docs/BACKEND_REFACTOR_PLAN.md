@@ -39,7 +39,7 @@ and easy to review.
 - Future safe step: move pure signal gating and dedup helpers into `services/trading_signal_policy.py`.
 - Future safe step: move exchange/kline fetch helpers into `services/trading_market_data.py`.
 - Future safe step: move notification persistence into `services/trading_notifications.py`.
-- Future safe step: move cross-sectional strategy helpers into `services/cross_sectional_execution.py`.
+- Future safe step: design portfolio-strategy execution as a separate module only after the backtest engine contract is ready.
 - Keep order execution and position mutation close to `TradingExecutor` until live-trading tests cover broker edge cases.
 
 ## Data And Market Domain

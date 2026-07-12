@@ -20,8 +20,8 @@ def test_strategy_uses_fill_ledger_grid():
     )
 
 
-def test_strategy_uses_fill_ledger_indicator_false():
-    assert not strategy_uses_fill_ledger({"strategy_type": "IndicatorStrategy"})
+def test_strategy_uses_fill_ledger_non_script_false():
+    assert not strategy_uses_fill_ledger({"strategy_type": "LegacyStrategy"})
 
 
 def test_strategy_uses_fill_ledger_martingale_bot_false():

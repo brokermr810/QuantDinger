@@ -10,6 +10,12 @@ import traceback
 import time
 
 from app.services.strategy_compiler import StrategyCompiler
+from app.services.ai_generation_contracts import (
+    INDICATOR_TO_STRATEGY_SYSTEM_PROMPT,
+    SCRIPT_STRATEGY_REPAIR_REQUIREMENTS,
+    SCRIPT_STRATEGY_QUICK_TOOL_SYSTEM_PROMPT,
+    SCRIPT_STRATEGY_SYSTEM_PROMPT,
+)
 from app.services.strategy_code_quality import (
     analyze_strategy_code_quality,
     strategy_ai_text,
@@ -23,6 +29,8 @@ from app.services.strategy_live_guard import (
     live_conflict_message,
     strategy_live_lock_key,
 )
+from app.services.portfolio_strategy_runtime import validate_portfolio_strategy_code
+from app.services.strategy import redact_strategy_row
 from app.routes.strategy_blueprint import strategy_blp
 from app.routes.strategy_services import get_strategy_service
 from app import get_trading_executor
@@ -35,7 +43,6 @@ logger = get_logger(__name__)
 
 # Register split strategy route modules on the shared blueprint.
 from app.routes import strategy_account_routes  # noqa: E402,F401
-from app.routes import strategy_backtest_routes  # noqa: E402,F401
 from app.routes import strategy_deviation_routes  # noqa: E402,F401
 from app.routes import strategy_grid_routes  # noqa: E402,F401
 from app.routes import strategy_ledger_routes  # noqa: E402,F401
@@ -43,6 +50,8 @@ from app.routes import strategy_logs_routes  # noqa: E402,F401
 from app.routes import strategy_notifications  # noqa: E402,F401
 from app.routes import strategy_positions_routes  # noqa: E402,F401
 from app.routes import strategy_review_routes  # noqa: E402,F401
+from app.routes import strategy_asset_routes  # noqa: E402,F401
+from app.routes import strategy_executor_routes  # noqa: E402,F401
 from app.routes import script_source_routes  # noqa: E402,F401
 
 
@@ -56,6 +65,29 @@ def _find_live_strategy_conflict(strategy: Dict[str, Any], user_id: int) -> Opti
 
 def _live_conflict_message(conflict: Dict[str, Any]) -> str:
     return live_conflict_message(conflict)
+
+
+def _extract_script_metadata_from_code(code: str) -> Dict[str, str]:
+    source = str(code or "")
+    meta = {"name": "", "description": ""}
+    for key, names in (
+        ("name", ("my_strategy_name", "strategy_name")),
+        ("description", ("my_strategy_description", "strategy_description")),
+    ):
+        pattern = r"^\s*(?:" + "|".join(re.escape(name) for name in names) + r")\s*=\s*(['\"])(.*?)\1\s*$"
+        match = re.search(pattern, source, flags=re.MULTILINE)
+        if match:
+            meta[key] = str(match.group(2) or "").strip()
+    doc_match = re.match(r"\s*(\"\"\"|''')([\s\S]*?)\1", source)
+    if doc_match:
+        lines = [str(line or "").strip() for line in str(doc_match.group(2) or "").splitlines()]
+        first_idx = next((idx for idx, line in enumerate(lines) if line), -1)
+        if first_idx >= 0:
+            if not meta["name"]:
+                meta["name"] = lines[first_idx]
+            if not meta["description"]:
+                meta["description"] = "\n".join(lines[first_idx + 1:]).strip()
+    return meta
 
 
 def _analyze_strategy_code_quality(code: str) -> list[dict]:
@@ -109,6 +141,30 @@ def _strategy_human_summary(
         lang=lang,
     )
 
+
+def _strategy_performance_summary(initial_capital: float, equity_curve: list[dict] | None) -> dict:
+    try:
+        initial = float(initial_capital or 0.0)
+    except Exception:
+        initial = 0.0
+    curve = equity_curve if isinstance(equity_curve, list) else []
+    final = initial
+    if curve:
+        last = curve[-1] if isinstance(curve[-1], dict) else {}
+        try:
+            final = float(last.get("equity", last.get("value", initial)) or 0.0)
+        except Exception:
+            final = initial
+    total_return = final - initial
+    total_return_pct = (total_return / initial * 100.0) if initial > 0 else 0.0
+    return {
+        "initial_capital": round(initial, 8),
+        "final_equity": round(final, 8),
+        "total_return": round(total_return, 8),
+        "total_return_pct": round(total_return_pct, 8),
+    }
+
+
 @strategy_blp.route('/strategies', methods=['GET'])
 @login_required
 def list_strategies():
@@ -118,7 +174,11 @@ def list_strategies():
     try:
         user_id = g.user_id
         items = get_strategy_service().list_strategies(user_id=user_id)
-        return jsonify({'code': 1, 'msg': 'success', 'data': {'strategies': items}})
+        return jsonify({
+            'code': 1,
+            'msg': 'success',
+            'data': {'strategies': [redact_strategy_row(item) for item in items]},
+        })
     except Exception as e:
         logger.error(f"list_strategies failed: {str(e)}")
         logger.error(traceback.format_exc())
@@ -136,7 +196,7 @@ def get_strategy_detail():
         st = get_strategy_service().get_strategy(strategy_id, user_id=user_id)
         if not st:
             return jsonify({'code': 0, 'msg': 'Strategy not found', 'data': None}), 404
-        return jsonify({'code': 1, 'msg': 'success', 'data': st})
+        return jsonify({'code': 1, 'msg': 'success', 'data': redact_strategy_row(st)})
     except Exception as e:
         logger.error(f"get_strategy_detail failed: {str(e)}")
         logger.error(traceback.format_exc())
@@ -151,7 +211,7 @@ def create_strategy():
         payload = request.get_json() or {}
         # Use current user's ID
         payload['user_id'] = user_id
-        payload['strategy_type'] = payload.get('strategy_type') or 'IndicatorStrategy'
+        payload['strategy_type'] = payload.get('strategy_type') or 'ScriptStrategy'
         new_id = get_strategy_service().create_strategy(payload)
         return jsonify({'code': 1, 'msg': 'success', 'data': {'id': new_id}})
     except ValueError as e:
@@ -177,7 +237,7 @@ def batch_create_strategies():
         user_id = g.user_id
         payload = request.get_json() or {}
         payload['user_id'] = user_id
-        payload['strategy_type'] = payload.get('strategy_type') or 'IndicatorStrategy'
+        payload['strategy_type'] = payload.get('strategy_type') or 'ScriptStrategy'
         
         result = get_strategy_service().batch_create_strategies(payload)
         
@@ -526,11 +586,11 @@ def start_strategy():
         # Get strategy type
         strategy_type = get_strategy_service().get_strategy_type(strategy_id)
 
-        # IndicatorStrategy and ScriptStrategy are executed by TradingExecutor.
-        if strategy_type == 'PromptBasedStrategy':
+        # Only ScriptStrategy is executable. Indicators are chart-only.
+        if strategy_type != 'ScriptStrategy':
             return jsonify({
                 'code': 0,
-                'msg': 'AI strategy has been removed; local edition does not support starting AI strategies',
+                'msg': 'Indicators are chart-only. Convert the indicator to a ScriptStrategy before live trading.',
                 'data': None
             }), 400
 
@@ -688,9 +748,24 @@ def verify_strategy_code():
         if not code.strip():
             return jsonify({'success': False, 'message': 'Code is empty'})
 
-        validation = _validate_strategy_code_internal(code)
+        asset_type = str(payload.get('assetType') or payload.get('asset_type') or 'script').strip().lower()
+        if asset_type == 'portfolio_strategy':
+            try:
+                validate_portfolio_strategy_code(code)
+                validation = {'success': True, 'hints': [], 'errors': [], 'warnings': []}
+            except (SyntaxError, ValueError) as exc:
+                validation = {
+                    'success': False,
+                    'hints': [{'code': 'PORTFOLIO_CONTRACT_INVALID', 'severity': 'error', 'params': {'message': str(exc)}}],
+                    'errors': [str(exc)],
+                    'warnings': [],
+                    'message': str(exc),
+                }
+        else:
+            validation = _validate_strategy_code_internal(code)
         if validation.get('success'):
             strategy_id = int(payload.get('strategyId') or payload.get('strategy_id') or 0)
+            source_id = int(payload.get('scriptSourceId') or payload.get('script_source_id') or payload.get('sourceId') or 0)
             if strategy_id:
                 try:
                     get_strategy_service().patch_trading_config(
@@ -704,6 +779,40 @@ def verify_strategy_code():
                     )
                 except Exception as _lc_err:
                     logger.warning(f"lifecycle_verified patch skipped: {_lc_err}")
+            if source_id:
+                try:
+                    with get_db_connection() as db:
+                        cur = db.cursor()
+                        cur.execute(
+                            "SELECT metadata FROM qd_script_sources WHERE id = ? AND user_id = ?",
+                            (source_id, g.user_id),
+                        )
+                        row = cur.fetchone() or {}
+                        metadata = row.get('metadata') if isinstance(row, dict) else {}
+                        if isinstance(metadata, str):
+                            try:
+                                metadata = json.loads(metadata)
+                            except Exception:
+                                metadata = {}
+                        if not isinstance(metadata, dict):
+                            metadata = {}
+                        metadata.update({
+                            'lifecycle_verified': True,
+                            'script_verified': True,
+                            'lifecycle_verified_at': datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'),
+                        })
+                        cur.execute(
+                            """
+                            UPDATE qd_script_sources
+                            SET metadata = ?::jsonb, updated_at = NOW()
+                            WHERE id = ? AND user_id = ?
+                            """,
+                            (json.dumps(metadata, ensure_ascii=False), source_id, g.user_id),
+                        )
+                        db.commit()
+                        cur.close()
+                except Exception as _source_err:
+                    logger.warning(f"script source verified metadata patch skipped: {_source_err}")
         return jsonify(validation)
     except Exception as e:
         logger.error(f"verify_strategy_code failed: {str(e)}")
@@ -767,6 +876,8 @@ def publish_strategy_template():
             description=description,
             pricing_type=pricing_type,
             price=price,
+            vip_free=bool(payload.get("vipFree") or payload.get("vip_free") or False),
+            code_hidden=bool(payload.get("codeHidden") or payload.get("code_hidden") or payload.get("hideCode") or False),
             is_admin=is_admin,
             existing_indicator_id=existing_indicator_id,
             source_id=source_id,
@@ -784,51 +895,12 @@ def publish_strategy_template():
 @strategy_blp.route('/strategies/publish-bot-preset', methods=['POST'])
 @login_required
 def publish_bot_preset():
-    """Publish a bot strategy configuration to marketplace as bot_preset asset."""
-    try:
-        payload = request.get_json() or {}
-        strategy_id = int(payload.get('strategyId') or payload.get('strategy_id') or 0)
-        if not strategy_id:
-            return jsonify({'code': 0, 'msg': 'strategyId is required', 'data': None}), 400
-
-        strategy = get_strategy_service().get_strategy(strategy_id, user_id=g.user_id)
-        if not strategy:
-            return jsonify({'code': 0, 'msg': 'Strategy not found', 'data': None}), 404
-
-        strategy_mode = str(strategy.get('strategy_mode') or '').strip().lower()
-        if strategy_mode != 'bot':
-            return jsonify({'code': 0, 'msg': 'Only bot strategies can be published as presets', 'data': None}), 400
-
-        name = (payload.get('name') or strategy.get('strategy_name') or '').strip()
-        description = (payload.get('description') or '').strip()
-        pricing_type = (payload.get('pricingType') or payload.get('pricing_type') or 'free').strip() or 'free'
-        try:
-            price = float(payload.get('price') or 0)
-        except Exception:
-            price = 0.0
-        existing_indicator_id = int(payload.get('indicatorId') or payload.get('indicator_id') or 0)
-
-        user_role = getattr(g, 'user_role', 'user')
-        is_admin = user_role == 'admin'
-
-        from app.services.community_service import get_community_service
-        ok, msg, data = get_community_service().publish_bot_preset_from_strategy(
-            user_id=g.user_id,
-            strategy_id=strategy_id,
-            name=name,
-            description=description,
-            pricing_type=pricing_type,
-            price=price,
-            is_admin=is_admin,
-            existing_indicator_id=existing_indicator_id,
-            strategy=strategy,
-        )
-        if not ok:
-            return jsonify({'code': 0, 'msg': msg, 'data': data}), 400
-        return jsonify({'code': 1, 'msg': 'success', 'data': data})
-    except Exception as e:
-        logger.error(f"publish_bot_preset failed: {str(e)}")
-        return jsonify({'code': 0, 'msg': str(e), 'data': None}), 500
+    """Deprecated: bot presets are now published as editable script templates."""
+    return jsonify({
+        'code': 0,
+        'msg': 'bot_preset publishing is deprecated; publish the generated script as a script template',
+        'data': None,
+    }), 410
 
 
 @strategy_blp.route('/strategies/ai-generate', methods=['POST'])
@@ -852,10 +924,12 @@ def ai_generate_strategy():
         from app.services.billing_service import get_billing_service
         billing = get_billing_service()
         user_id = g.user_id
+        billing_feature = 'ai_indicator_to_strategy' if intent == 'indicator_to_strategy' else 'ai_code_gen'
+        billing_ref = payload.get('source_indicator_id') if intent == 'indicator_to_strategy' else ''
         ok, billing_msg = billing.check_and_consume(
             user_id=user_id,
-            feature='ai_code_gen',
-            reference_id=f"ai_strategy_{intent}_{user_id}_{int(time.time())}"
+            feature=billing_feature,
+            reference_id=str(billing_ref or f"ai_strategy_{intent}_{user_id}_{int(time.time())}")
         )
         if not ok:
             msg = f'Insufficient credits: {billing_msg}' if billing_msg else _strategy_ai_text('insufficient_credits', lang)
@@ -884,10 +958,10 @@ Hard boundary:
 - Those fields are selected in the run panel, not tuned as script template parameters.
 
 Percent parameter convention (IMPORTANT):
-- Template UI stores percent-type fields on a 0-100 scale (80 = 80%, 2.5 = 2.5%).
-- Generated Python code uses 0-1 ratios in ctx.param(...); the platform converts UI values automatically.
-- When returning JSON for adjust_params, always use the 0-100 scale for keys ending in _pct or typed as percent
-  (e.g. position_pct: 80, hard_stop_pct: 2.5). Never return 0.8 when the user means 80%.
+- Script template params are code-native values. Do not convert percent-like keys to UI percent numbers.
+- For *_pct, *_ratio, allocation, weight, or position-size fields, return the exact ratio value that should
+  be written into ctx.param(...): 0.08 means 8%, 0.8 means 80%, and 1 means 100%.
+- Never return 8 when the user means 8%; return 0.08.
 """
 
             user_content = (
@@ -927,42 +1001,13 @@ Percent parameter convention (IMPORTANT):
                 return jsonify({'code': '', 'params': None, 'msg': _strategy_ai_text('invalid_json_params', lang)})
             return jsonify({'code': '', 'params': updates, 'msg': _strategy_ai_text('success', lang)})
 
-        system_prompt = """You are a QuantDinger script-code generator.
-Return ONLY Python code. Do not use markdown fences or explanations.
-
-Framework:
-- Always define def on_init(ctx): and def on_bar(ctx, bar):.
-- on_bar runs on the platform's fixed 1m bar stream; live execution also checks the latest price every 10 seconds.
-- bar supports bar['open'], bar['high'], bar['low'], bar['close'], bar['volume'], bar['timestamp'].
-- Use ctx.bars(n), ctx.state.get/set(...), ctx.log(...), and ctx.basket(side).
-
-Product boundary:
-- The run panel owns symbol, spot/swap, direction, investment amount, and leverage.
-- Read those values from ctx.direction, ctx.market_type, ctx.investment_amount, and ctx.leverage when needed.
-- Never define them with ctx.param(...). Do not create ctx.param for direction, trade_direction, market_type, symbol, timeframe, investment_amount, initial_capital, leverage, or base_notional.
-- Strategy code owns only strategy-specific knobs such as periods, multipliers, spacing, take-profit, stop-loss, and cooldown.
-
-Order sizing:
-- For new stateful script strategies, prefer ctx.basket(side).open_child_order(..., notional=quote_amount, price=price, action='open'/'add').
-- Derive quote_amount from ctx.investment_amount. Do not hard-code a base_notional parameter.
-- For spot, only long direction is meaningful; the run panel enforces this.
-- If you must use ctx.open_long/open_short, amount is base quantity, not quote notional. Prefer basket notional sizing for consistency.
-
-State and safety:
-- Use ctx.state for layer counters, anchors, average cost, cooldowns, and last_order_bar.
-- Prevent duplicate orders on the same bar.
-- Scale-ins must have max layer/order limits, price-distance triggers, and hard stop or explicit wait state.
-- Entry logic should be event-based where possible: EMA crosses, channel breaks, band touches, etc.
-
-Sandbox rules:
-- Do not use getattr, setattr, delattr, eval, exec, open, compile, globals, vars, dir, __builtins__, dunder attributes, file/network/database/process APIs, or unsafe imports.
-- Do not import os, sys, requests, urllib, socket, subprocess, threading, multiprocessing, sqlite3, psycopg, sqlalchemy, pathlib, tempfile, glob, io, operator, pickle, or ctypes.
-- Keep loops bounded by lookback windows. Do not create unbounded lists or infinite loops.
-
-Percent / ratio convention:
-- ctx.param defaults for *_pct fields must use 0-1 ratios (0.8 = 80%, 0.025 = 2.5%).
-- Template UI may show 0-100; Python default literals must remain ratios.
-"""
+        source = str(payload.get('source') or payload.get('entry_source') or '').strip().lower()
+        if intent == 'indicator_to_strategy':
+            system_prompt = INDICATOR_TO_STRATEGY_SYSTEM_PROMPT
+        elif source in ('copilot_quick_tool', 'homepage_ai_assistant', 'ai_assistant_quick_tool'):
+            system_prompt = SCRIPT_STRATEGY_QUICK_TOOL_SYSTEM_PROMPT
+        else:
+            system_prompt = SCRIPT_STRATEGY_SYSTEM_PROMPT
 
         extra = ''
         template_key = payload.get('template_key')
@@ -1002,12 +1047,20 @@ Percent / ratio convention:
         AUTO_FIX_HINT_CODES = {
             'MISSING_ON_INIT',
             'MISSING_ON_BAR',
+            'CTX_PARAM_MISSING_DEFAULT',
+            'CTX_PARAM_RUN_PANEL_FIELD',
+            'INDICATOR_OUTPUT_CONTRACT',
+            'BASKET_CHILD_ORDER_MISSING_LAYER_ORDER',
+            'BASKET_SIDE_MUST_BE_LONG_OR_SHORT',
         }
 
         def _needs_auto_fix_strategy(validation: dict) -> bool:
             if not validation.get('success'):
                 return True
-            return any(h.get('code') in AUTO_FIX_HINT_CODES for h in (validation.get('hints') or []))
+            hint_codes = {h.get('code') for h in (validation.get('hints') or [])}
+            if intent == 'indicator_to_strategy' and 'INITIAL_STAKE_WITHOUT_DYNAMIC_CAPITAL' in hint_codes:
+                return True
+            return bool(hint_codes & AUTO_FIX_HINT_CODES)
 
         def _format_strategy_validation_issues(validation: dict) -> str:
             issues = []
@@ -1033,14 +1086,7 @@ Percent / ratio convention:
                 "# Current code\n```python\n"
                 + bad_code.strip()
                 + "\n```\n\n"
-                "# Repair requirements\n"
-                "- Must define both on_init(ctx) and on_bar(ctx, bar).\n"
-                "- Must compile and run in QuantDinger strategy runtime.\n"
-                "- Use ctx.param(...) only for strategy knobs, never for symbol/market/direction/investment/leverage/base_notional.\n"
-                "- Do not use getattr/setattr/delattr or any unsafe file/network/import/introspection API.\n"
-                "- Prefer ctx.basket(side).open_child_order(..., notional=quote_amount, price=price) for entries and adds.\n"
-                "- Entry conditions must be edge/crossing events; scale-ins need layer limits, distance triggers, and cooldowns.\n"
-                "- Return Python only, no markdown, no explanation."
+                + SCRIPT_STRATEGY_REPAIR_REQUIREMENTS
             )
             repaired_content = llm.call_llm_api(
                 messages=[
@@ -1111,7 +1157,56 @@ Percent / ratio convention:
             logger.info("ai_generate_strategy debug=%s", json.dumps(debug, ensure_ascii=False))
 
         if content:
-            return jsonify({'code': content, 'msg': _strategy_ai_text('success', lang), 'params': None, 'debug': debug})
+            saved_source = None
+            if payload.get('save_script_source') or payload.get('saveScriptSource'):
+                try:
+                    code_meta = _extract_script_metadata_from_code(content)
+                    source_name = str(
+                        code_meta.get('name')
+                        or payload.get('script_source_name')
+                        or payload.get('source_name')
+                        or payload.get('strategy_name')
+                        or 'AI Generated Strategy'
+                    ).strip() or 'AI Generated Strategy'
+                    source_description = str(
+                        code_meta.get('description')
+                        or payload.get('script_source_description')
+                        or payload.get('description')
+                        or ''
+                    )
+                    metadata = payload.get('script_source_metadata') or payload.get('metadata') or {}
+                    if not isinstance(metadata, dict):
+                        metadata = {}
+                    metadata.update({
+                        'generated_by': 'ai_strategy_generator',
+                        'ai_generate_intent': intent,
+                        'source_indicator_id': payload.get('source_indicator_id') or metadata.get('source_indicator_id') or '',
+                        'script_verified': bool(debug.get('final_validation', {}).get('success')),
+                        'lifecycle_verified': bool(debug.get('final_validation', {}).get('success')),
+                    })
+                    from app.services.script_source import get_script_source_service
+                    service = get_script_source_service()
+                    source_id = service.create_source({
+                        'user_id': user_id,
+                        'name': source_name,
+                        'description': source_description,
+                        'code': content,
+                        'template_key': payload.get('template_key') or '',
+                        'param_schema': {},
+                        'metadata': metadata,
+                    })
+                    saved_source = service.get_source(source_id, user_id=user_id) or {'id': source_id}
+                except Exception as save_err:
+                    logger.error("ai_generate_strategy save script source failed: %s", save_err)
+                    return jsonify({
+                        'code': content,
+                        'msg': f"{_strategy_ai_text('success', lang)}, but saving script source failed: {save_err}",
+                        'params': None,
+                        'debug': debug,
+                        'data': {'source': None, 'source_id': None, 'save_error': str(save_err)}
+                    }), 500
+            data = {'source': saved_source, 'source_id': saved_source.get('id') if isinstance(saved_source, dict) else None} if saved_source else None
+            return jsonify({'code': content, 'msg': _strategy_ai_text('success', lang), 'params': None, 'debug': debug, 'data': data})
         else:
             return jsonify({'code': '', 'msg': _strategy_ai_text('ai_empty_result', lang), 'params': None, 'debug': debug})
     except Exception as e:

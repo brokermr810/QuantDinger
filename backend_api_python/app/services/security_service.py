@@ -3,9 +3,12 @@ Security Service - Handles Turnstile verification, rate limiting, and brute-forc
 """
 import os
 import json
+import hashlib
 import requests
 from datetime import datetime, timedelta
 from typing import Tuple, Optional, Dict, Any
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
+from app.config.settings import Config
 from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
 
@@ -80,6 +83,11 @@ class SecurityService:
         # Verification code rate limit
         self.code_rate_limit_seconds = int(os.getenv('VERIFICATION_CODE_RATE_LIMIT', '60'))
         self.code_ip_hourly_limit = int(os.getenv('VERIFICATION_CODE_IP_HOURLY_LIMIT', '10'))
+        self.turnstile_clearance_ttl_seconds = int(os.getenv('TURNSTILE_CLEARANCE_TTL_SECONDS', '600'))
+        self._turnstile_clearance_serializer = URLSafeTimedSerializer(
+            Config.SECRET_KEY,
+            salt='turnstile-clearance-v1',
+        )
     
     def get_security_config(self) -> Dict[str, Any]:
         """Get public security config for frontend"""
@@ -140,6 +148,53 @@ class SecurityService:
             # On API error, we might want to allow (fail-open) or deny (fail-closed)
             # For security, we'll deny
             return False, 'Turnstile service unavailable'
+
+    def _turnstile_ip_hash(self, ip_address: str = None) -> str:
+        ip = str(ip_address or '').strip()
+        return hashlib.sha256(ip.encode('utf-8')).hexdigest()
+
+    def issue_turnstile_clearance(self, ip_address: str = None) -> str:
+        """Issue a short-lived local clearance after a valid Turnstile challenge."""
+        payload = {
+            'ip': self._turnstile_ip_hash(ip_address),
+            'purpose': 'auth',
+        }
+        return self._turnstile_clearance_serializer.dumps(payload)
+
+    def verify_turnstile_clearance(self, clearance: str, ip_address: str = None) -> Tuple[bool, str]:
+        """Verify the short-lived local clearance token."""
+        if not self.turnstile_enabled:
+            return True, 'turnstile_disabled'
+        if not clearance:
+            return False, 'missing_clearance'
+        try:
+            payload = self._turnstile_clearance_serializer.loads(
+                clearance,
+                max_age=max(1, self.turnstile_clearance_ttl_seconds),
+            )
+        except SignatureExpired:
+            return False, 'turnstile_clearance_expired'
+        except BadSignature:
+            return False, 'turnstile_clearance_invalid'
+        if not isinstance(payload, dict) or payload.get('purpose') != 'auth':
+            return False, 'turnstile_clearance_invalid'
+        if payload.get('ip') != self._turnstile_ip_hash(ip_address):
+            return False, 'turnstile_clearance_invalid'
+        return True, 'verified'
+
+    def verify_turnstile_or_clearance(
+        self,
+        token: str = '',
+        clearance: str = '',
+        ip_address: str = None,
+    ) -> Tuple[bool, str]:
+        """Accept either a fresh Turnstile token or a local short-lived clearance."""
+        if not self.turnstile_enabled:
+            return True, 'turnstile_disabled'
+        clearance_ok, clearance_msg = self.verify_turnstile_clearance(clearance, ip_address)
+        if clearance_ok:
+            return True, clearance_msg
+        return self.verify_turnstile(token, ip_address)
     
     # =========================================================================
     # Rate Limiting & Brute-Force Protection

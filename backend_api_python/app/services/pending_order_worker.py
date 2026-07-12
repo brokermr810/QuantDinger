@@ -3,7 +3,7 @@ Pending order worker.
 
 This worker polls `pending_orders` periodically and dispatches orders based on `execution_mode`:
 - signal: send notifications (no real trading).
-- live: not implemented (paper mode only).
+- live: dispatch normalized live orders through exchange and broker clients.
 """
 
 from __future__ import annotations
@@ -31,6 +31,13 @@ from app.services.live_trading.account_positions import (
     account_legs_from_exchange_maps,
     sync_account_positions,
 )
+from app.services.live_trading.adapters import LiveOrderPhaseAdapter
+from app.services.live_trading.contracts import OrderIntent
+from app.services.live_trading.executors import (
+    LimitThenMarketExecutor,
+    MarketOrderExecutor,
+    RestingLimitExecutor,
+)
 from app.services.live_trading.leg_context import (
     credential_id_from_exchange_config,
 )
@@ -51,14 +58,9 @@ from app.services.pending_orders.live_order_support import (
     signal_to_side_pos_reduce,
 )
 from app.services.pending_orders.live_order_phases import (
-    apply_fill_snapshot,
-    apply_okx_tail_guard,
-    cancel_live_limit_order,
     maker_limit_price,
-    place_live_limit_order,
-    place_live_market_order,
-    wait_live_order_fill,
 )
+from app.services.grid.exchange_orders import query_grid_order_fill
 from app.services.pending_orders.position_sync_cache import (
     exchange_sync_backoff_sec,
     get_position_sync_snapshot,
@@ -68,6 +70,10 @@ from app.services.pending_orders.position_sync_cache import (
     position_sync_cache_key,
     set_exchange_sync_backoff,
     set_position_sync_snapshot,
+)
+from app.services.pending_orders.sent_order_recovery import (
+    normalize_live_order_status,
+    tracked_fill_baseline,
 )
 from app.services.live_trading.binance import BinanceFuturesClient
 from app.services.live_trading.binance_spot import BinanceSpotClient
@@ -183,6 +189,7 @@ class PendingOrderWorker:
     def _tick(self) -> None:
         # logger.info(f"[PendingOrderWorker] _tick start. last_sync={self._last_position_sync_ts}")
         self._sync_alpaca_sent_orders()
+        self._sync_live_sent_orders()
         orders = self._fetch_pending_orders(limit=self.batch_size)
         # logger.info(f"[PendingOrderWorker] orders fetched: {len(orders)}")
         if not orders:
@@ -309,10 +316,8 @@ class PendingOrderWorker:
                         sid,
                     )
                     continue
-                # Signal-mode strategies only sync when explicitly targeted.
-                # This catches positions closed manually on the exchange.
-                if exec_mode != "live" and not target_strategy_id:
-                    logger.debug(f"[PositionSync] Strategy {sid} skipped: execution_mode='{exec_mode}' (needs 'live' or explicit target)")
+                if exec_mode != "live":
+                    logger.debug(f"[PositionSync] Strategy {sid} skipped: execution_mode='{exec_mode}'")
                     continue
                 sync_user_id = int(sc.get("user_id") or 1)
                 exchange_config = resolve_exchange_config(sc.get("exchange_config") or {}, user_id=sync_user_id)
@@ -1031,16 +1036,302 @@ class PendingOrderWorker:
             cur.execute(
                 """
                 UPDATE strategy_order_intents soi
-                SET status = CASE WHEN %s > 0 THEN 'filled' ELSE 'submitted' END,
-                    exchange_order_id = COALESCE(NULLIF(%s, ''), exchange_order_id),
+                SET status = CASE
+                        WHEN %s = 'filled' THEN 'filled'
+                        WHEN %s = 'failed' THEN 'rejected'
+                        WHEN %s = 'cancelled' THEN 'cancelled'
+                        WHEN %s > 0 THEN 'partially_filled'
+                        ELSE 'submitted'
+                    END,
+                    exchange_order_id = COALESCE(NULLIF(po.exchange_order_id, ''), soi.exchange_order_id),
                     updated_at = NOW()
                 FROM pending_orders po
                 WHERE po.id = %s
                   AND po.order_intent_id = soi.id
                 """,
                 (
+                    str(status or "sent"),
+                    str(status or "sent"),
+                    str(status or "sent"),
                     float(filled or 0.0),
-                    str(exchange_order_id or ""),
+                    int(order_id),
+                ),
+            )
+            db.commit()
+            cur.close()
+
+    def _sync_live_sent_orders(self, limit: int = 50) -> None:
+        """Reconcile submitted crypto orders, including durable resting limits."""
+        rows = self._fetch_live_sent_orders(limit=limit)
+        for row in rows:
+            try:
+                self._sync_one_live_sent_order(row)
+            except Exception as exc:
+                logger.warning(
+                    "Live fill sync failed: pending_id=%s exchange=%s err=%s",
+                    row.get("id"),
+                    row.get("exchange_id"),
+                    exc,
+                )
+
+    def _fetch_live_sent_orders(self, limit: int = 50) -> List[Dict[str, Any]]:
+        try:
+            stale_sec = max(0, int(self._stale_processing_sec or 0))
+            with get_db_connection() as db:
+                cur = db.cursor()
+                if stale_sec > 0:
+                    cur.execute(
+                        """
+                        UPDATE pending_orders
+                        SET status = 'sent',
+                            dispatch_note = 'live_fill_sync:requeued_stale_sync',
+                            updated_at = NOW()
+                        WHERE status = 'syncing'
+                          AND LOWER(COALESCE(exchange_id, '')) <> 'alpaca'
+                          AND updated_at < NOW() - (%s * INTERVAL '1 second')
+                        """,
+                        (stale_sec,),
+                    )
+                    db.commit()
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM pending_orders
+                    WHERE status = 'sent'
+                      AND LOWER(COALESCE(exchange_id, '')) <> 'alpaca'
+                      AND COALESCE(exchange_id, '') <> ''
+                      AND COALESCE(exchange_order_id, '') <> ''
+                    ORDER BY sent_at ASC NULLS FIRST, id ASC
+                    LIMIT %s
+                    """,
+                    (int(limit),),
+                )
+                rows = cur.fetchall() or []
+                cur.close()
+            return rows
+        except Exception as exc:
+            logger.warning("fetch_live_sent_orders failed: %s", exc)
+            return []
+
+    def _claim_live_sent_order(self, order_id: int) -> Optional[Dict[str, Any]]:
+        if int(order_id or 0) <= 0:
+            return None
+        with get_db_connection() as db:
+            cur = db.cursor()
+            cur.execute(
+                """
+                UPDATE pending_orders
+                SET status = 'syncing',
+                    dispatch_note = 'live_fill_sync:syncing',
+                    updated_at = NOW()
+                WHERE id = %s
+                  AND status = 'sent'
+                  AND LOWER(COALESCE(exchange_id, '')) <> 'alpaca'
+                  AND COALESCE(exchange_order_id, '') <> ''
+                RETURNING *
+                """,
+                (int(order_id),),
+            )
+            row = cur.fetchone()
+            db.commit()
+            cur.close()
+        return row if isinstance(row, dict) else None
+
+    def _sync_one_live_sent_order(self, row: Dict[str, Any]) -> None:
+        order_id = int(row.get("id") or 0)
+        claimed = self._claim_live_sent_order(order_id)
+        if not claimed:
+            return
+        row = claimed
+        payload: Dict[str, Any] = {}
+        try:
+            payload = json.loads(str(row.get("payload_json") or "{}")) or {}
+        except Exception:
+            payload = {}
+
+        strategy_id = int(payload.get("strategy_id") or row.get("strategy_id") or 0)
+        symbol = str(payload.get("symbol") or row.get("symbol") or "").strip()
+        market_type = str(payload.get("market_type") or row.get("market_type") or "swap").strip().lower()
+        exchange_order_id = str(row.get("exchange_order_id") or "").strip()
+        exchange_id = str(row.get("exchange_id") or "").strip().lower()
+        if strategy_id <= 0 or not symbol or not exchange_order_id:
+            self._mark_failed(order_id=order_id, error="live_fill_sync_invalid_order_context")
+            return
+
+        sc = load_strategy_configs(strategy_id)
+        exchange_config = resolve_exchange_config(
+            sc.get("exchange_config") or {},
+            user_id=int(sc.get("user_id") or row.get("user_id") or 1),
+        )
+        try:
+            client = create_client(exchange_config, market_type=market_type)
+            if exchange_id == "ibkr" and hasattr(client, "get_order_status"):
+                broker_result = client.get_order_status(exchange_order_id)
+                cumulative_filled = float(broker_result.filled or 0.0)
+                cumulative_avg = float(broker_result.avg_price or 0.0)
+                exchange_status = normalize_live_order_status(broker_result.status)
+            else:
+                cumulative_filled, cumulative_avg, exchange_status = query_grid_order_fill(
+                    client,
+                    symbol=symbol,
+                    market_type=market_type,
+                    exchange_order_id=exchange_order_id,
+                    client_order_id="",
+                    exchange_config=exchange_config,
+                )
+        except Exception as exc:
+            self._update_live_sent_order_snapshot(
+                order_id=order_id,
+                status="sent",
+                exchange_status="sync_error",
+                filled=float(row.get("filled") or 0.0),
+                avg_price=float(row.get("avg_price") or 0.0),
+                exchange_response_json=json.dumps({"error": str(exc)}, ensure_ascii=False),
+            )
+            return
+
+        cumulative_filled = max(0.0, float(cumulative_filled or 0.0))
+        cumulative_avg = max(0.0, float(cumulative_avg or 0.0))
+        exchange_status = str(exchange_status or "unknown").strip().lower()
+        previous_filled = max(0.0, float(row.get("filled") or 0.0))
+        previous_avg = max(0.0, float(row.get("avg_price") or 0.0))
+        tracked_previous_filled, tracked_previous_avg = tracked_fill_baseline(
+            row,
+            exchange_order_id=exchange_order_id,
+            previous_filled=previous_filled,
+            previous_avg=previous_avg,
+        )
+        delta = cumulative_filled - tracked_previous_filled
+        aggregate_filled = previous_filled
+        aggregate_avg = previous_avg
+
+        if delta > ALPACA_FILL_DELTA_EPSILON and cumulative_avg > 0:
+            delta_avg = cumulative_avg
+            if tracked_previous_filled > 0 and tracked_previous_avg > 0:
+                delta_notional = (
+                    cumulative_filled * cumulative_avg
+                    - tracked_previous_filled * tracked_previous_avg
+                )
+                if delta_notional > 0:
+                    delta_avg = delta_notional / delta
+            if previous_filled > 0 and previous_avg > 0:
+                aggregate_notional = previous_filled * previous_avg + delta * delta_avg
+                aggregate_filled = previous_filled + delta
+                aggregate_avg = aggregate_notional / aggregate_filled
+            else:
+                aggregate_filled = previous_filled + delta
+                aggregate_avg = delta_avg
+            signal_type = str(payload.get("signal_type") or row.get("signal_type") or "")
+            persist_strategy_fill(
+                strategy_id=strategy_id,
+                symbol=symbol,
+                signal_type=signal_type,
+                filled=delta,
+                avg_price=delta_avg,
+                exchange_config=exchange_config,
+                market_type=market_type,
+                order_id=order_id,
+                fill_source="worker_live_fill_sync",
+                close_reason=trade_close_reason_from_payload(payload, signal_type),
+                strategy_run_id=int(payload.get("strategy_run_id") or row.get("strategy_run_id") or 0),
+                order_intent_id=int(payload.get("order_intent_id") or row.get("order_intent_id") or 0),
+                basket_id=str(payload.get("basket_id") or ""),
+                exchange_id=exchange_id,
+                exchange_order_id=exchange_order_id,
+                raw_fill={"status": exchange_status, "cumulative_filled": cumulative_filled},
+            )
+            append_strategy_log(
+                strategy_id,
+                "trade",
+                f"Exchange fill synced: {signal_type} {symbol} filled={delta:.6f} @ {delta_avg:.6f}",
+            )
+
+        if delta > ALPACA_FILL_DELTA_EPSILON and cumulative_avg <= 0:
+            exchange_status = "fill_price_missing"
+
+        if delta <= ALPACA_FILL_DELTA_EPSILON:
+            aggregate_filled = previous_filled
+            aggregate_avg = previous_avg
+
+        queue_status = "sent"
+        if exchange_status == "filled" and cumulative_avg > 0:
+            queue_status = "filled"
+        elif exchange_status == "cancelled":
+            queue_status = "cancelled"
+
+        self._update_live_sent_order_snapshot(
+            order_id=order_id,
+            status=queue_status,
+            exchange_status=exchange_status,
+            filled=aggregate_filled,
+            avg_price=aggregate_avg,
+            exchange_response_json=json.dumps(
+                {
+                    "status": exchange_status,
+                    "filled": aggregate_filled,
+                    "avg_price": aggregate_avg,
+                    "live_fill_sync": {
+                        "tracked_filled": cumulative_filled,
+                        "tracked_avg_price": cumulative_avg,
+                    },
+                },
+                ensure_ascii=False,
+            ),
+        )
+
+    def _update_live_sent_order_snapshot(
+        self,
+        *,
+        order_id: int,
+        status: str,
+        exchange_status: str,
+        filled: float,
+        avg_price: float,
+        exchange_response_json: str,
+    ) -> None:
+        with get_db_connection() as db:
+            cur = db.cursor()
+            cur.execute(
+                """
+                UPDATE pending_orders
+                SET status = %s,
+                    dispatch_note = %s,
+                    filled = %s,
+                    avg_price = %s,
+                    exchange_response_json = %s,
+                    executed_at = CASE WHEN %s > 0 THEN COALESCE(executed_at, NOW()) ELSE executed_at END,
+                    updated_at = NOW()
+                WHERE id = %s
+                """,
+                (
+                    str(status or "sent"),
+                    f"live_fill_sync:{exchange_status or 'unknown'}",
+                    float(filled or 0.0),
+                    float(avg_price or 0.0),
+                    str(exchange_response_json or ""),
+                    float(filled or 0.0),
+                    int(order_id),
+                ),
+            )
+            cur.execute(
+                """
+                UPDATE strategy_order_intents soi
+                SET status = CASE
+                        WHEN %s = 'filled' THEN 'filled'
+                        WHEN %s = 'cancelled' THEN 'cancelled'
+                        WHEN %s > 0 THEN 'partially_filled'
+                        ELSE 'submitted'
+                    END,
+                    exchange_order_id = COALESCE(NULLIF(po.exchange_order_id, ''), soi.exchange_order_id),
+                    updated_at = NOW()
+                FROM pending_orders po
+                WHERE po.id = %s
+                  AND po.order_intent_id = soi.id
+                """,
+                (
+                    str(status or "sent"),
+                    str(status or "sent"),
+                    float(filled or 0.0),
                     int(order_id),
                 ),
             )
@@ -1534,6 +1825,13 @@ class PendingOrderWorker:
         _default_maker_offset_bps = float(os.getenv("MAKER_OFFSET_BPS", "2"))
 
         order_mode = str(payload.get("order_mode") or payload.get("orderMode") or _default_order_mode).strip().lower()
+        execution_algo = str(payload.get("execution_algo") or "").strip().lower()
+        if execution_algo == "market":
+            order_mode = "market"
+        elif execution_algo in ("limit_then_market", "maker", "maker_then_market"):
+            order_mode = "maker_then_market"
+        elif execution_algo == "limit":
+            order_mode = "limit"
         maker_wait_sec = float(payload.get("maker_wait_sec") or payload.get("makerWaitSec") or _default_maker_wait_sec)
         maker_offset_bps = float(payload.get("maker_offset_bps") or payload.get("makerOffsetBps") or _default_maker_offset_bps)
         if maker_wait_sec <= 0:
@@ -1763,92 +2061,8 @@ class PendingOrderWorker:
                 )
             return
 
-        # Phase 1: limit (hang order)
         limit_order_id = ""
         limit_client_oid = ""
-        if use_limit_first:
-            try:
-                limit_price = maker_limit_price(ref_price=ref_price, side=side, maker_offset=maker_offset)
-                limit_client_oid = make_client_order_id(
-                    exchange_id=exchange_id,
-                    strategy_id=strategy_id,
-                    order_id=order_id,
-                    phase="lmt",
-                )
-                res1 = place_live_limit_order(
-                    client=client,
-                    symbol=str(symbol),
-                    side=side,
-                    amount=float(remaining or 0.0),
-                    price=float(limit_price or 0.0),
-                    reduce_only=reduce_only,
-                    pos_side=pos_side,
-                    client_order_id=limit_client_oid,
-                    market_type=market_type,
-                    payload=payload,
-                    exchange_config=exchange_config,
-                    leverage=leverage,
-                    order_mode=order_mode,
-                )
-                limit_order_id = str(res1.exchange_order_id or "")
-                phases["limit_place"] = res1.raw
-
-                q = wait_live_order_fill(
-                    client=client,
-                    symbol=str(symbol),
-                    order_id=limit_order_id,
-                    client_order_id=limit_client_oid,
-                    market_type=market_type,
-                    exchange_config=exchange_config,
-                    max_wait_sec=maker_wait_sec,
-                    phase="limit",
-                )
-                phases["limit_query"] = q
-                apply_fill_snapshot(fills, q)
-
-                remaining = max(0.0, float(amount or 0.0) - fills.total_base)
-                remaining = apply_okx_tail_guard(
-                    client=client,
-                    symbol=str(symbol),
-                    remaining=remaining,
-                    market_type=market_type,
-                    phases=phases,
-                )
-
-                if remaining > max(0.0, float(amount or 0.0) * 0.001):
-                    try:
-                        phases["limit_cancel"] = cancel_live_limit_order(
-                            client=client,
-                            symbol=str(symbol),
-                            order_id=limit_order_id,
-                            client_order_id=limit_client_oid,
-                            market_type=market_type,
-                            exchange_config=exchange_config,
-                        )
-                    except Exception:
-                        pass
-            except LiveTradingError as e:
-                logger.warning(f"live limit phase failed: pending_id={order_id}, strategy_id={strategy_id}, cfg={safe_cfg}, err={e}")
-                remaining = float(amount or 0.0)
-                friendly_error = self._friendly_order_error(
-                    e,
-                    client=client,
-                    exchange_id=exchange_id,
-                    symbol=symbol,
-                    signal_type=signal_type,
-                    amount=amount,
-                    price=ref_price,
-                    payload=payload,
-                )
-                phases["limit_error"] = friendly_error
-                append_strategy_log(strategy_id, "error", f"Exchange limit order failed ({exchange_id} {symbol}): {friendly_error}, falling back to market")
-            except Exception as e:
-                logger.warning(f"live limit phase unexpected error: pending_id={order_id}, strategy_id={strategy_id}, cfg={safe_cfg}, err={e}")
-                remaining = float(amount or 0.0)
-                phases["limit_error"] = str(e)
-                append_strategy_log(strategy_id, "error", f"Limit order unexpected error ({exchange_id} {symbol}): {e}, falling back to market")
-
-        # Phase 2: market for remaining
         market_order_id = ""
         market_client_oid = make_client_order_id(
             exchange_id=exchange_id,
@@ -1856,43 +2070,93 @@ class PendingOrderWorker:
             order_id=order_id,
             phase="mkt",
         )
-        if remaining > 0:
-            try:
-                res2 = place_live_market_order(
-                    client=client,
-                    symbol=str(symbol),
-                    side=side,
-                    amount=float(remaining or 0.0),
-                    reduce_only=reduce_only,
-                    pos_side=pos_side,
-                    client_order_id=market_client_oid,
-                    market_type=market_type,
-                    payload=payload,
-                    exchange_config=exchange_config,
-                    leverage=leverage,
+        try:
+            limit_price = 0.0
+            if execution_algo == "limit" or use_limit_first:
+                explicit_limit_price = float(payload.get("limit_price") or 0.0)
+                limit_price = explicit_limit_price or maker_limit_price(
                     ref_price=ref_price,
-                    spot_quote_amt=spot_quote_amt,
-                    spot_market_buy_uses_quote=spot_market_buy_uses_quote,
+                    side=side,
+                    maker_offset=maker_offset,
                 )
-                market_order_id = str(res2.exchange_order_id or "")
-                phases["market_place"] = res2.raw
-
-                q2 = wait_live_order_fill(
-                    client=client,
-                    symbol=str(symbol),
-                    order_id=market_order_id,
-                    client_order_id=market_client_oid,
-                    market_type=market_type,
-                    exchange_config=exchange_config,
-                    max_wait_sec=12.0,
-                    phase="market",
+                limit_client_oid = make_client_order_id(
+                    exchange_id=exchange_id,
+                    strategy_id=strategy_id,
+                    order_id=order_id,
+                    phase="lmt",
                 )
-                phases["market_query"] = q2
-                apply_fill_snapshot(fills, q2)
-            except LiveTradingError as e:
-                logger.warning(f"live market phase failed: pending_id={order_id}, strategy_id={strategy_id}, cfg={safe_cfg}, err={e}")
+            adapter = LiveOrderPhaseAdapter(
+                client=client,
+                exchange_id=exchange_id,
+                payload=payload,
+                exchange_config=exchange_config,
+                order_mode=order_mode,
+                ref_price=ref_price,
+                spot_quote_amt=spot_quote_amt,
+                spot_market_buy_uses_quote=spot_market_buy_uses_quote,
+            )
+            intent = OrderIntent(
+                symbol=str(symbol),
+                side=side,
+                quantity=float(remaining or 0.0),
+                market_type=market_type,
+                price=float(limit_price or 0.0),
+                pos_side=pos_side,
+                reduce_only=reduce_only,
+                client_order_id=market_client_oid,
+                fallback_client_order_id=market_client_oid,
+                leverage=leverage,
+                margin_mode=str(payload.get("margin_mode") or payload.get("td_mode") or "cross"),
+                exchange_config=exchange_config,
+            )
+            if execution_algo == "limit":
+                intent = OrderIntent(
+                    symbol=intent.symbol,
+                    side=intent.side,
+                    quantity=intent.quantity,
+                    market_type=intent.market_type,
+                    price=intent.price,
+                    pos_side=intent.pos_side,
+                    reduce_only=intent.reduce_only,
+                    client_order_id=limit_client_oid,
+                    fallback_client_order_id=market_client_oid,
+                    leverage=intent.leverage,
+                    margin_mode=intent.margin_mode,
+                    exchange_config=intent.exchange_config,
+                )
+                execution_result = RestingLimitExecutor(adapter).execute(intent)
+                limit_order_id = str(execution_result.exchange_order_id or "")
+            elif use_limit_first:
+                intent = OrderIntent(
+                    symbol=intent.symbol,
+                    side=intent.side,
+                    quantity=intent.quantity,
+                    market_type=intent.market_type,
+                    price=intent.price,
+                    pos_side=intent.pos_side,
+                    reduce_only=intent.reduce_only,
+                    client_order_id=limit_client_oid,
+                    fallback_client_order_id=market_client_oid,
+                    leverage=intent.leverage,
+                    margin_mode=intent.margin_mode,
+                    exchange_config=intent.exchange_config,
+                )
+                execution_result = LimitThenMarketExecutor(
+                    adapter,
+                    max_wait_sec=maker_wait_sec,
+                    fallback_to_market=bool(
+                        payload.get(
+                            "close_fallback_to_market" if reduce_only else "open_fallback_to_market",
+                            True,
+                        )
+                    ),
+                ).execute(intent)
+            else:
+                execution_result = MarketOrderExecutor(adapter).execute(intent)
+            phases["executor"] = execution_result.raw
+            if not execution_result.success:
                 friendly_error = self._friendly_order_error(
-                    e,
+                    execution_result.error,
                     client=client,
                     exchange_id=exchange_id,
                     symbol=symbol,
@@ -1901,26 +2165,38 @@ class PendingOrderWorker:
                     price=ref_price,
                     payload=payload,
                 )
-                phases["market_error"] = friendly_error
-                if float(fills.total_base or 0.0) > 0:
-                    _console_print(
-                        f"[worker] market tail failed but partial filled: strategy_id={strategy_id} pending_id={order_id} filled={fills.total_base} err={e}"
-                    )
-                    remaining = 0.0
-                    append_strategy_log(strategy_id, "error", f"Exchange market order partially failed ({symbol} {signal_type}): {friendly_error} (partial filled={fills.total_base})")
-                else:
-                    self._mark_failed(order_id=order_id, error=friendly_error)
-                    _console_print(f"[worker] order failed: strategy_id={strategy_id} pending_id={order_id} err={friendly_error}")
-                    _notify_live_best_effort(status="failed", error=friendly_error, amount_hint=amount, price_hint=ref_price)
-                    append_strategy_log(strategy_id, "error", f"Exchange order failed ({exchange_id} {symbol} {signal_type}): {friendly_error}")
-                    return
-            except Exception as e:
-                logger.warning(f"live market phase unexpected error: pending_id={order_id}, strategy_id={strategy_id}, cfg={safe_cfg}, err={e}")
-                self._mark_failed(order_id=order_id, error=str(e))
-                _console_print(f"[worker] order unexpected error: strategy_id={strategy_id} pending_id={order_id} err={e}")
-                _notify_live_best_effort(status="failed", error=str(e), amount_hint=amount, price_hint=ref_price)
-                append_strategy_log(strategy_id, "error", f"Unexpected order error ({exchange_id} {symbol} {signal_type}): {e}")
+                self._mark_failed(order_id=order_id, error=friendly_error)
+                _console_print(f"[worker] order failed: strategy_id={strategy_id} pending_id={order_id} err={friendly_error}")
+                _notify_live_best_effort(status="failed", error=friendly_error, amount_hint=amount, price_hint=ref_price)
+                append_strategy_log(strategy_id, "error", f"Exchange order failed ({exchange_id} {symbol} {signal_type}): {friendly_error}")
                 return
+            fills.apply_fill(float(execution_result.filled_qty or 0.0), float(execution_result.avg_price or 0.0))
+            if execution_algo != "limit":
+                market_order_id = str(execution_result.exchange_order_id or "")
+        except LiveTradingError as e:
+            logger.warning(f"live executor failed: pending_id={order_id}, strategy_id={strategy_id}, cfg={safe_cfg}, err={e}")
+            friendly_error = self._friendly_order_error(
+                e,
+                client=client,
+                exchange_id=exchange_id,
+                symbol=symbol,
+                signal_type=signal_type,
+                amount=amount,
+                price=ref_price,
+                payload=payload,
+            )
+            self._mark_failed(order_id=order_id, error=friendly_error)
+            _console_print(f"[worker] order failed: strategy_id={strategy_id} pending_id={order_id} err={friendly_error}")
+            _notify_live_best_effort(status="failed", error=friendly_error, amount_hint=amount, price_hint=ref_price)
+            append_strategy_log(strategy_id, "error", f"Exchange order failed ({exchange_id} {symbol} {signal_type}): {friendly_error}")
+            return
+        except Exception as e:
+            logger.warning(f"live executor unexpected error: pending_id={order_id}, strategy_id={strategy_id}, cfg={safe_cfg}, err={e}")
+            self._mark_failed(order_id=order_id, error=str(e))
+            _console_print(f"[worker] order unexpected error: strategy_id={strategy_id} pending_id={order_id} err={e}")
+            _notify_live_best_effort(status="failed", error=str(e), amount_hint=amount, price_hint=ref_price)
+            append_strategy_log(strategy_id, "error", f"Unexpected order error ({exchange_id} {symbol} {signal_type}): {e}")
+            return
 
         # Build final result (best-effort); live path never fabricates fill qty from request amount.
         filled_final = float(fills.total_base or 0.0)
@@ -1978,7 +2254,8 @@ class PendingOrderWorker:
                 exchange_response_json=json.dumps({"phases": (post_query or {})}, ensure_ascii=False),
                 filled=filled,
                 avg_price=avg_price,
-                executed_at=executed_at,
+                executed_at=executed_at if filled > 0 else None,
+                final_filled=bool(amount > 0 and filled >= amount * 0.999999),
             )
             _console_print(f"[worker] order sent: strategy_id={strategy_id} pending_id={order_id} exchange={res.exchange_id} order_id={res.exchange_order_id} filled={filled} avg={avg_price}")
         except Exception as e:
@@ -2121,13 +2398,6 @@ class PendingOrderWorker:
             avg_price = float(result.avg_price or 0.0)
             exchange_order_id = str(result.order_id or "")
 
-            if avg_price <= 0 and ref_price > 0:
-                logger.warning(f"[worker] IBKR order avg_price=0, using ref_price={ref_price} as fallback: strategy_id={strategy_id} pending_id={order_id}")
-                avg_price = ref_price
-            if filled <= 0:
-                logger.warning(f"[worker] IBKR order filled=0, using amount={amount} as fallback: strategy_id={strategy_id} pending_id={order_id}")
-                filled = amount
-
             executed_at = int(time.time())
 
             # Mark order as sent
@@ -2139,7 +2409,8 @@ class PendingOrderWorker:
                 exchange_response_json=json.dumps(result.raw or {}, ensure_ascii=False),
                 filled=filled,
                 avg_price=avg_price,
-                executed_at=executed_at,
+                executed_at=executed_at if filled > 0 else None,
+                final_filled=bool(amount > 0 and filled >= amount * 0.999999 and avg_price > 0),
             )
             _console_print(f"[worker] IBKR order sent: strategy_id={strategy_id} pending_id={order_id} order_id={exchange_order_id} filled={filled} avg={avg_price}")
 
@@ -2284,7 +2555,8 @@ class PendingOrderWorker:
                 exchange_response_json=json.dumps(result.raw or {}, ensure_ascii=False),
                 filled=filled,
                 avg_price=avg_price,
-                executed_at=executed_at,
+                executed_at=executed_at if filled > 0 else None,
+                final_filled=bool(amount > 0 and filled >= amount * 0.999999 and avg_price > 0),
             )
             _console_print(
                 f"[worker] Alpaca order sent: strategy_id={strategy_id} pending_id={order_id} "
@@ -2350,6 +2622,7 @@ class PendingOrderWorker:
         filled: float = 0.0,
         avg_price: float = 0.0,
         executed_at: Optional[int] = None,
+        final_filled: bool = False,
     ) -> None:
         with get_db_connection() as db:
             cur = db.cursor()
@@ -2357,7 +2630,7 @@ class PendingOrderWorker:
             cur.execute(
                 """
                 UPDATE pending_orders
-                SET status = 'sent',
+                SET status = CASE WHEN %s THEN 'filled' ELSE 'sent' END,
                     last_error = %s,
                     dispatch_note = %s,
                     sent_at = NOW(),
@@ -2371,6 +2644,7 @@ class PendingOrderWorker:
                 WHERE id = %s
                 """,
                 (
+                    bool(final_filled),
                     "",
                     str(note or ""),
                     executed_at is not None,  # Boolean flag for CASE WHEN
@@ -2381,6 +2655,22 @@ class PendingOrderWorker:
                     float(avg_price or 0.0),
                     int(order_id),
                 ),
+            )
+            cur.execute(
+                """
+                UPDATE strategy_order_intents soi
+                SET status = CASE
+                        WHEN %s THEN 'filled'
+                        WHEN %s > 0 THEN 'partially_filled'
+                        ELSE 'submitted'
+                    END,
+                    exchange_order_id = COALESCE(NULLIF(po.exchange_order_id, ''), soi.exchange_order_id),
+                    updated_at = NOW()
+                FROM pending_orders po
+                WHERE po.id = %s
+                  AND po.order_intent_id = soi.id
+                """,
+                (bool(final_filled), float(filled or 0.0), int(order_id)),
             )
             db.commit()
             cur.close()

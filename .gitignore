@@ -22,7 +22,9 @@
 .env
 .env.local
 .env.*.local
+backend.env
 backend_api_python/.env
+.codex-review/
 
 # ========================
 # IDE & OS
@@ -58,6 +60,7 @@ build/
 venv/
 .venv/
 env/
+backend_api_python/.test_deps/
 
 # ========================
 # Node (if any remain)

@@ -6,6 +6,7 @@ finnhub-python>=2.4.18
 yfinance>=0.2.18
 ccxt>=4.0.0
 pandas>=1.5.0
+exchange-calendars>=4.13,<5
 requests>=2.32.0
 litellm>=1.80,<1.87
 certifi>=2024.2.2
@@ -26,11 +27,14 @@ psycopg2-binary>=2.9.9
 redis>=5.0.0
 # Production WSGI server
 gunicorn>=22.0.0
+# Test runner
+pytest>=8.0,<9
 # OpenAPI generation (flask-smorest)
 flask-smorest>=0.44.0,<0.48
 marshmallow>=3.24.1,<5
 PyYAML>=6.0
 # Server-side PDF export for AI analysis reports
+pypdf>=6.0,<7
 reportlab>=4.2.0
 # Password hashing
 bcrypt>=4.1.0

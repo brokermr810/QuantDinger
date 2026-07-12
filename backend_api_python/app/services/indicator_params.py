@@ -1,14 +1,4 @@
-"""
-Indicator Parameters Parser and Helper Functions
-
-支持两个核心功能：
-1. 指标参数外部传递 - 解析指标代码中的 @param 声明
-2. 指标调用其他指标 - 提供 call_indicator() 函数
-
-参数声明格式：
-
-支持的类型：int, float, bool, str
-"""
+"""Parameter parsers for chart indicators and ScriptStrategy annotations."""
 
 import re
 from typing import Dict, Any, List, Optional, Tuple, TYPE_CHECKING
@@ -22,18 +12,14 @@ logger = get_logger(__name__)
 
 
 class StrategyConfigParser:
-    """
-    解析指标代码中的 @strategy 注解，提取策略配置（止盈止损、仓位等）。
-
-    支持的注解格式:
-    """
+    """Parse ScriptStrategy ``# @strategy`` and contract header annotations."""
 
     STRATEGY_PATTERN = re.compile(
         r'#\s*@strategy\s+(\w+)\s*:?\s*(\S+)\s*(.*)',
         re.IGNORECASE
     )
     CONTRACT_HEADER_PATTERN = re.compile(
-        r'\b(signal_form|exit_owner|flip_mode)\s*:?\s*(\S+)',
+        r'\b(signal_form|signalForm|exit_owner|exitOwner|flip_mode|flipMode|timeframe|kline_timeframe|klineTimeframe|signal_timing|signalTiming|startup_candle_count|startupCandleCount)\s*:?\s*(\S+)',
         re.IGNORECASE
     )
 
@@ -44,9 +30,9 @@ class StrategyConfigParser:
         'trailingEnabled':      {'type': 'bool'},
         'trailingStopPct':      {'type': 'float', 'min': 0, 'max': 1},
         'trailingActivationPct':{'type': 'float', 'min': 0, 'max': 1},
-        'tradeDirection':       {'type': 'str',   'enum': ['long', 'short', 'both']},
+        'maxHoldingBars':       {'type': 'int', 'min': 0, 'max': 100000},
     }
-    VALID_EXIT_OWNERS = {'engine', 'indicator'}
+    VALID_EXIT_OWNERS = {'engine', 'indicator', 'strategy'}
 
     @classmethod
     def parse_contract_headers(cls, code: str) -> Dict[str, Any]:
@@ -54,8 +40,10 @@ class StrategyConfigParser:
 
         Supported examples:
           # signal_form: four_way
-          # exit_owner: indicator
+          # exit_owner: strategy
           # flip_mode: R1
+          # timeframe: 1H
+          # signal_timing: next_bar_open
 
         These are deliberately separate from ``# @strategy`` risk defaults so
         an indicator can declare who owns exits without also forcing risk
@@ -71,6 +59,19 @@ class StrategyConfigParser:
             for m in cls.CONTRACT_HEADER_PATTERN.finditer(line[1:].strip()):
                 key = m.group(1).lower()
                 raw_val = str(m.group(2) or "").strip()
+                if key == "exitowner":
+                    key = "exit_owner"
+                elif key == "signalform":
+                    key = "signal_form"
+                elif key == "flipmode":
+                    key = "flip_mode"
+                elif key == "klinetimeframe":
+                    key = "kline_timeframe"
+                elif key == "signaltiming":
+                    key = "signal_timing"
+                elif key == "startupcandlecount":
+                    key = "startup_candle_count"
+
                 if key == "exit_owner":
                     owner = raw_val.lower()
                     if owner in cls.VALID_EXIT_OWNERS:
@@ -79,14 +80,39 @@ class StrategyConfigParser:
                     headers["signal_form"] = raw_val.lower()
                 elif key == "flip_mode":
                     headers["flip_mode"] = raw_val.upper()
+                elif key in {"timeframe", "kline_timeframe"}:
+                    tf = raw_val.strip()
+                    if tf in {"1m", "3m", "5m", "15m", "30m", "1H", "4H", "1D", "1W"}:
+                        headers["timeframe"] = tf
+                elif key == "signal_timing":
+                    timing = raw_val.lower()
+                    timing_aliases = {
+                        "next": "next_bar_open",
+                        "nextopen": "next_bar_open",
+                        "next_open": "next_bar_open",
+                        "next_bar_open": "next_bar_open",
+                        "same": "same_bar_close",
+                        "samebar": "same_bar_close",
+                        "same_bar": "same_bar_close",
+                        "same_bar_close": "same_bar_close",
+                        "current": "same_bar_close",
+                        "current_bar": "same_bar_close",
+                        "current_bar_close": "same_bar_close",
+                    }
+                    if timing in timing_aliases:
+                        headers["signal_timing"] = timing_aliases[timing]
+                elif key == "startup_candle_count":
+                    try:
+                        count = int(raw_val)
+                    except (TypeError, ValueError):
+                        continue
+                    if 0 <= count <= 5000:
+                        headers["startup_candle_count"] = count
         return headers
 
     @classmethod
     def parse(cls, code: str) -> Dict[str, Any]:
-        """
-        解析代码中的 @strategy 注解，返回策略配置字典。
-        只包含代码中声明的键，未声明的不包含。
-        """
+        """Return only the ``# @strategy`` keys declared in code."""
         config: Dict[str, Any] = {}
         if not code:
             return config
@@ -129,7 +155,7 @@ class StrategyConfigParser:
 
     @classmethod
     def normalize_entry_ratio(cls, value: Any, default: float = 1.0) -> float:
-        """Align with BacktestService: @strategy entryPct is a 0–1 capital fraction."""
+        """Align with UnifiedBacktestService: @strategy entryPct is a 0-1 capital fraction."""
         if value is None or value == 0:
             return float(default)
         try:
@@ -145,7 +171,7 @@ class StrategyConfigParser:
         """
         Build backtest-compatible nested cfg from # @strategy annotations.
 
-        All *_Pct fields are 0–1 ratios (entryPct 1 = 100%, stopLossPct 0.15 = 15%).
+        All *_Pct fields are 0-1 ratios (entryPct 1 = 100%, stopLossPct 0.15 = 15%).
         """
         parsed = cls.parse(code or "")
         headers = cls.parse_contract_headers(code or "")
@@ -163,36 +189,30 @@ class StrategyConfigParser:
                 "risk": {
                     "stopLossPct": float(parsed.get("stopLossPct") or 0),
                     "takeProfitPct": float(parsed.get("takeProfitPct") or 0),
+                    "maxHoldingBars": int(parsed.get("maxHoldingBars") or 0),
                     "trailing": trailing,
                 },
                 "position": {
                     "entryPct": cls.normalize_entry_ratio(parsed.get("entryPct")),
                 },
             })
-        if parsed.get("tradeDirection"):
-            cfg["tradeDirection"] = parsed["tradeDirection"]
         if headers.get("exit_owner"):
             cfg["exitOwner"] = headers["exit_owner"]
+        if headers.get("timeframe"):
+            cfg["timeframe"] = headers["timeframe"]
+        if headers.get("signal_timing"):
+            cfg.setdefault("execution", {})["signalTiming"] = headers["signal_timing"]
+        if headers.get("startup_candle_count") is not None:
+            cfg["startupCandleCount"] = int(headers["startup_candle_count"])
         return cfg
-
-    @classmethod
-    def ratio_to_trading_config_percent(cls, ratio: Any) -> float:
-        """Convert 0–1 @strategy ratio to trading_config percent (15 -> 15%, 0.001 -> 0.1%)."""
-        try:
-            n = float(ratio)
-        except (TypeError, ValueError):
-            return 0.0
-        if n <= 0:
-            return 0.0
-        return round(n * 100.0, 6)
 
     @classmethod
     def to_trading_config_risk_flat(cls, code: str) -> Dict[str, Any]:
         """
-        Map # @strategy annotations to flat trading_config risk fields for DB storage.
+        Map # @strategy annotations to legacy flat keys without unit conversion.
 
-        Code annotations use 0–1 ratios; trading_config.*_pct stores percent numbers
-        consumed by trading_executor._to_ratio() when code annotations are absent.
+        New runtime paths use ``_strategy_cfg_from_code``. This helper remains
+        for narrow compatibility/tests and preserves exactly what code declares.
         """
         parsed = cls.parse(code or "")
         headers = cls.parse_contract_headers(code or "")
@@ -200,32 +220,26 @@ class StrategyConfigParser:
             return {}
         out: Dict[str, Any] = {}
         if "stopLossPct" in parsed:
-            out["stop_loss_pct"] = cls.ratio_to_trading_config_percent(parsed["stopLossPct"])
+            out["stop_loss_pct"] = float(parsed["stopLossPct"])
         if "takeProfitPct" in parsed:
-            out["take_profit_pct"] = cls.ratio_to_trading_config_percent(parsed["takeProfitPct"])
+            out["take_profit_pct"] = float(parsed["takeProfitPct"])
         if "trailingStopPct" in parsed:
-            out["trailing_stop_pct"] = cls.ratio_to_trading_config_percent(parsed["trailingStopPct"])
+            out["trailing_stop_pct"] = float(parsed["trailingStopPct"])
         if "trailingActivationPct" in parsed:
-            out["trailing_activation_pct"] = cls.ratio_to_trading_config_percent(
-                parsed["trailingActivationPct"]
-            )
+            out["trailing_activation_pct"] = float(parsed["trailingActivationPct"])
         if "trailingEnabled" in parsed:
             out["trailing_enabled"] = bool(parsed["trailingEnabled"])
         if "entryPct" in parsed:
-            ep = cls.normalize_entry_ratio(parsed["entryPct"])
-            out["entry_pct"] = min(100.0, max(0.01, cls.ratio_to_trading_config_percent(ep)))
-        if "tradeDirection" in parsed:
-            out["trade_direction"] = parsed["tradeDirection"]
+            out["entry_pct"] = cls.normalize_entry_ratio(parsed["entryPct"])
+        if "maxHoldingBars" in parsed:
+            out["max_holding_bars"] = int(parsed["maxHoldingBars"] or 0)
         if headers.get("exit_owner"):
             out["exit_owner"] = headers["exit_owner"]
         return out
 
     @classmethod
     def generate_annotations(cls, config: Dict[str, Any]) -> str:
-        """
-        从策略配置字典生成 @strategy 注解行。
-        用于AI生成代码时自动附加。
-        """
+        """Generate ``# @strategy`` annotation lines from a config dict."""
         lines = []
         for key, spec in cls.VALID_KEYS.items():
             if key in config:
@@ -237,7 +251,7 @@ class StrategyConfigParser:
 
 
 class IndicatorParamsParser:
-    """解析指标代码中的参数声明"""
+    """Parse chart indicator ``# @param`` declarations."""
     
     PARAM_PATTERN = re.compile(
         r'#\s*@param\s+(\w+)\s+(int|float|bool|str|string)\s+(\S+)\s*(.*)',
@@ -253,7 +267,7 @@ class IndicatorParamsParser:
     @classmethod
     def parse_params(cls, indicator_code: str) -> List[Dict[str, Any]]:
         """
-        解析指标代码中的参数声明
+        Parse ``# @param`` declarations from indicator source.
         
         Returns:
             List of param definitions:
@@ -262,7 +276,7 @@ class IndicatorParamsParser:
                     "name": "ma_fast",
                     "type": "int",
                     "default": 5,
-                    "description": "短期均线周期",
+                    "description": "Short moving-average period",
                     "values": [3, 5, 7, ...]   # optional: from `range=...` or `values=...`
                 },
                 ...
@@ -371,7 +385,7 @@ class IndicatorParamsParser:
     
     @classmethod
     def _convert_value(cls, value_str: str, param_type: str) -> Any:
-        """转换字符串值为对应类型"""
+        """Convert a raw string value to the declared parameter type."""
         try:
             param_type = param_type.lower()
             if param_type == 'int':
@@ -388,14 +402,14 @@ class IndicatorParamsParser:
     @classmethod
     def merge_params(cls, declared_params: List[Dict], user_params: Dict[str, Any]) -> Dict[str, Any]:
         """
-        合并声明的参数和用户提供的参数
+        Merge declared defaults with user-provided values.
         
         Args:
-            declared_params: 从代码中解析的参数声明
-            user_params: 用户提供的参数值
+            declared_params: Parameter declarations parsed from code.
+            user_params: User-provided parameter values.
             
         Returns:
-            合并后的参数字典（使用用户值或默认值）
+            Merged parameter dictionary using user values or defaults.
         """
         result = {}
         for param in declared_params:
@@ -446,9 +460,9 @@ class IndicatorParamsParser:
 
 class IndicatorCaller:
     """
-    指标调用器 - 允许一个指标调用另一个指标
+    Indicator caller that allows one chart indicator to call another.
     
-    使用方式（在指标代码中）：
+    Usage examples in indicator code:
         rsi_df = call_indicator(5, df)
         
         macd_df = call_indicator('My MACD', df)
@@ -459,26 +473,26 @@ class IndicatorCaller:
     def __init__(self, user_id: int, current_indicator_id: int = None):
         self.user_id = user_id
         self.current_indicator_id = current_indicator_id
-        self._call_stack = []  # 调用栈，用于检测循环依赖
+        self._call_stack = []  # Detect circular indicator dependencies.
     
     def call_indicator(
         self, 
-        indicator_ref: Any,  # int (ID) 或 str (名称)
+        indicator_ref: Any,  # int ID or str name
         df: 'pd.DataFrame',
         params: Dict[str, Any] = None,
         _depth: int = 0
     ) -> Optional['pd.DataFrame']:
         """
-        调用另一个指标并返回结果
+        Execute another indicator and return its DataFrame.
         
         Args:
-            indicator_ref: 指标ID或名称
-            df: 输入的K线数据
-            params: 传递给被调用指标的参数
-            _depth: 内部使用，跟踪调用深度
+            indicator_ref: Indicator ID or name.
+            df: Input OHLCV DataFrame.
+            params: Parameters passed to the called indicator.
+            _depth: Internal recursion depth.
             
         Returns:
-            执行后的DataFrame，包含被调用指标计算的列
+            DataFrame after the called indicator runs.
         """
         import pandas as pd
         import numpy as np
@@ -540,7 +554,7 @@ class IndicatorCaller:
             self._call_stack.pop()
     
     def _get_indicator_code(self, indicator_ref: Any) -> Tuple[Optional[str], Optional[int]]:
-        """获取指标代码"""
+        """Fetch indicator code by ID or name."""
         try:
             with get_db_connection() as db:
                 cursor = db.cursor()
@@ -574,13 +588,13 @@ class IndicatorCaller:
 
 def get_indicator_params(indicator_id: int) -> List[Dict[str, Any]]:
     """
-    获取指标的参数声明（供API调用）
+    Return indicator parameter declarations for API consumers.
     
     Args:
-        indicator_id: 指标ID
+        indicator_id: Indicator ID.
         
     Returns:
-        参数声明列表
+        Parameter declaration list.
     """
     try:
         with get_db_connection() as db:

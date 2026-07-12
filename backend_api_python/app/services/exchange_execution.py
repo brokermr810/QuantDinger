@@ -3,9 +3,8 @@ Exchange execution helpers (local deployment).
 
 This module provides helpers for resolving exchange configs and safe logging.
 
-Notes:
-- In paper mode, the system only enqueues signals into `pending_orders`.
-- Real trading execution is intentionally not implemented here.
+This module resolves encrypted credential references and normalizes broker
+configuration before the pending-order worker selects a live adapter.
 """
 
 from __future__ import annotations

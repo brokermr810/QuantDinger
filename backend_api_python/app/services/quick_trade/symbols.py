@@ -8,10 +8,6 @@ CRYPTO_EXCHANGES = {
     "okx",
     "bitget",
     "bybit",
-    "coinbaseexchange",
-    "coinbase_exchange",
-    "kraken",
-    "kucoin",
     "gate",
     "htx",
 }

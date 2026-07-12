@@ -1,5 +1,5 @@
 """
-LLM prompt construction and response parsing for AI experiment pipeline.
+LLM prompt construction and response parsing for the AI experiment pipeline.
 """
 
 from __future__ import annotations
@@ -14,17 +14,17 @@ from app.utils.logger import get_logger
 logger = get_logger(__name__)
 
 SYSTEM_PROMPT = """You are a quantitative trading strategy optimization expert.
-Your task is to propose parameter combinations for backtesting a trading indicator.
-You MUST return ONLY valid JSON — no explanations, no markdown fences.
+Your task is to propose parameter combinations for backtesting executable QuantDinger ScriptStrategy code.
+You MUST return ONLY valid JSON - no explanations, no markdown fences.
 The JSON must be an array of objects."""
 
 _ROUND_TEMPLATE = """\
-## Indicator Code
+## ScriptStrategy Code
 ```python
 {indicator_code}
 ```
 
-## Tunable Indicator Parameters (extracted from @param annotations)
+## Tunable Script Parameters (extracted from ctx.param / @param annotations)
 {indicator_params_block}
 
 ## Risk / Position Parameters (always tunable)
@@ -45,6 +45,7 @@ _ROUND_TEMPLATE = """\
 ## Task
 Generate exactly {n_candidates} diverse parameter sets.
 Each set MUST contain both indicatorParams and riskParams.
+Use indicatorParams as the backward-compatible container for ScriptStrategy parameter overrides.
 {learning_instruction}
 
 Return a JSON array:
@@ -65,18 +66,18 @@ Return a JSON array:
 
 
 def extract_indicator_params(code: str) -> List[Dict[str, Any]]:
-    """Parse @param declarations from indicator code."""
+    """Parse tunable parameter declarations from ScriptStrategy code."""
     return IndicatorParamsParser.parse_params(code or '')
 
 
 def _format_indicator_params(params: List[Dict[str, Any]]) -> str:
     if not params:
-        return "(No @param annotations found — indicator has no tunable params)"
+        return "(No ctx.param / @param declarations found - script has no tunable params)"
     lines = []
     for p in params:
         line = f"- {p['name']} ({p['type']}): default={p['default']}"
         if p.get('description'):
-            line += f"  — {p['description']}"
+            line += f" - {p['description']}"
         lines.append(line)
     return "\n".join(lines)
 
@@ -99,7 +100,7 @@ def _format_regime(regime: Optional[Dict[str, Any]]) -> str:
 
 def _format_previous_results(results: Optional[List[Dict[str, Any]]]) -> str:
     if not results:
-        return "This is Round 1 — no previous results."
+        return "This is Round 1 - no previous results."
     lines = []
     for r in results:
         score = (r.get('score') or {})
@@ -160,7 +161,6 @@ def parse_llm_candidates(raw_text: str) -> List[Dict[str, Any]]:
             text = text[:-3]
         text = text.strip()
 
-    # Try direct parse
     try:
         parsed = json.loads(text)
         if isinstance(parsed, list):
@@ -172,7 +172,6 @@ def parse_llm_candidates(raw_text: str) -> List[Dict[str, Any]]:
     except json.JSONDecodeError:
         pass
 
-    # Fallback: extract JSON array substring
     match = re.search(r'\[.*\]', text, re.DOTALL)
     if match:
         try:

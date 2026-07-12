@@ -106,7 +106,7 @@ def _is_bot_strategy(row: Dict[str, Any]) -> bool:
 
 
 def _strategy_bucket(row: Dict[str, Any]) -> str:
-    """Classify a strategy row into signal (indicator) / script / bot."""
+    """Classify a strategy row into script or bot."""
     if _is_bot_strategy(row):
         return "bot"
     mode = str((row or {}).get("strategy_mode") or "").strip().lower()
@@ -115,7 +115,7 @@ def _strategy_bucket(row: Dict[str, Any]) -> str:
     st = str((row or {}).get("strategy_type") or "").strip()
     if st == "ScriptStrategy":
         return "script"
-    return "signal"
+    return "script"
 
 
 from app.utils.pnl import calc_pnl_percent, calc_unrealized_pnl
@@ -327,7 +327,7 @@ def _compute_strategy_stats(trades: List[Dict[str, Any]], strategies: List[Dict[
         result.append({
             "strategy_id": sid,
             "strategy_name": sid_to_name.get(sid, f"Strategy_{sid}"),
-            "strategy_bucket": sid_to_bucket.get(sid, "signal"),
+            "strategy_bucket": sid_to_bucket.get(sid, "script"),
             "total_trades": stats["total_trades"],
             "win_rate": stats["win_rate"],
             "profit_factor": stats["profit_factor"],
@@ -366,28 +366,10 @@ def summary():
 
         running = [s for s in strategies if (s.get("status") or "").strip().lower() == "running"]
         running_strategy_count = len(running)
-        running_indicator_count = len([s for s in running if _strategy_bucket(s) == "signal"])
         running_script_count = len([s for s in running if _strategy_bucket(s) == "script"])
         running_bot_count = len([s for s in running if _strategy_bucket(s) == "bot"])
-        # Backward-compatible alias: previously only counted running indicator strategies.
-        indicator_strategy_count = running_indicator_count
-
-        # "AI strategies" in dashboard card: count strategies that enabled AI analysis/filtering.
-        # This aligns with the UI toggle `enable_ai_filter` in trading_config.
-        def _truthy(v: Any) -> bool:
-            if v is True:
-                return True
-            if isinstance(v, (int, float)) and float(v) == 1:
-                return True
-            if isinstance(v, str) and v.strip().lower() in ("1", "true", "yes", "y", "on"):
-                return True
-            return False
 
         ai_enabled_strategy_count = 0
-        for s in strategies:
-            tc = _safe_json_loads(s.get("trading_config"), {}) or {}
-            if isinstance(tc, dict) and _truthy(tc.get("enable_ai_filter")):
-                ai_enabled_strategy_count += 1
 
         # Positions (best-effort, filtered by user_id)
         with get_db_connection() as db:
@@ -618,9 +600,7 @@ def summary():
                 "msg": "success",
                 "data": {
                     "ai_strategy_count": int(ai_enabled_strategy_count),
-                    "indicator_strategy_count": int(indicator_strategy_count),
                     "running_strategy_count": int(running_strategy_count),
-                    "running_indicator_count": int(running_indicator_count),
                     "running_script_count": int(running_script_count),
                     "running_bot_count": int(running_bot_count),
                     "total_equity": round(total_equity, 2),

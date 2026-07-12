@@ -16,7 +16,7 @@ This inventory is a static snapshot extracted from Flask route decorators on the
 | --- | ---: | --- | --- |
 | `app/routes/strategy.py` | 16 | strategy lifecycle, templates, AI generation | very high |
 | `app/routes/strategy_account_routes.py` | 2 | account snapshot and account position mirror | medium |
-| `app/routes/strategy_backtest_routes.py` | 3 | strategy backtest run/history/detail facade | high |
+| `app/routes/backtest_center.py` | 3 | unified V2 backtest run/history/detail facade | high |
 | `app/routes/strategy_deviation_routes.py` | 1 | dry-run deviation report facade | medium |
 | `app/routes/strategy_grid_routes.py` | 1 | grid resting order query facade | medium |
 | `app/routes/strategy_ledger_routes.py` | 3 | strategy trades, equity curve, performance | high |

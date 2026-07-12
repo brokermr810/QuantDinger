@@ -18,7 +18,10 @@ _PREFIX_TAGS: list[tuple[str, str]] = [
     ("/api/auth", "Auth"),
     ("/api/users", "Users"),
     ("/api/indicator", "Indicator"),
+    ("/api/backtest", "Strategy"),
     ("/api/market", "Market"),
+    ("/api/universes", "Universe"),
+    ("/api/factors", "Factor"),
     ("/api/market-modules", "Market"),
     ("/api/ai", "AIChat"),
     ("/api/account", "Account"),
@@ -57,11 +60,15 @@ def register_human_blueprints(api: Api) -> None:
     from app.routes.auth import auth_blp
     from app.routes.user import user_blp
     from app.routes.kline import kline_blp
-    from app.routes.backtest import backtest_blp
+    from app.routes.backtest_center import backtest_center_blp
     from app.routes.market import market_blp
+    from app.routes.universe import universe_blp
+    from app.routes.portfolio_deployment import portfolio_deployment_blp
+    from app.routes.factors import factors_blp
     from app.routes.market_modules import market_modules_blp
     from app.routes.ai_chat import ai_chat_blp
     from app.routes.indicator import indicator_blp
+    from app.routes.indicator_signal_alerts import indicator_signal_alerts_blp
     from app.routes.strategy import strategy_blp
     from app.routes.credentials import credentials_blp
     from app.routes.dashboard import dashboard_blp
@@ -82,11 +89,15 @@ def register_human_blueprints(api: Api) -> None:
         (auth_blp, "/api/auth"),
         (user_blp, "/api/users"),
         (kline_blp, "/api/indicator"),
-        (backtest_blp, "/api/indicator"),
+        (backtest_center_blp, "/api/backtest"),
         (market_blp, "/api/market"),
+        (universe_blp, "/api/universes"),
+        (portfolio_deployment_blp, "/api/portfolio-deployments"),
+        (factors_blp, "/api/factors"),
         (market_modules_blp, "/api/market-modules"),
         (ai_chat_blp, "/api/ai"),
         (indicator_blp, "/api/indicator"),
+        (indicator_signal_alerts_blp, "/api/indicator"),
         (strategy_blp, "/api"),
         (credentials_blp, "/api/credentials"),
         (dashboard_blp, "/api/dashboard"),
@@ -195,9 +206,6 @@ def enrich_spec(spec_dict: dict) -> dict:
                 break
         if path in ("/", "/health", "/api/health"):
             tag = "Health"
-        if path.startswith("/api/indicator") and "/backtest" in path:
-            tag = "Backtest"
-
         for method, op in item.items():
             if method.startswith("x-") or not isinstance(op, dict):
                 continue

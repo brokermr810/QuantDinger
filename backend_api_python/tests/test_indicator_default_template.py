@@ -21,10 +21,13 @@ def _mock_df(length: int = 120) -> pd.DataFrame:
     )
 
 
-def test_default_template_has_four_way_columns():
+def test_default_template_has_no_execution_columns():
     code = build_default_indicator_template()
     for col in ("open_long", "close_long", "open_short", "close_short"):
-        assert f"df[\"{col}\"]" in code or f"df['{col}']" in code
+        assert f"df[\"{col}\"]" not in code
+        assert f"df['{col}']" not in code
+    assert "# @strategy" not in code
+    assert "signal_form" not in code
 
 
 def test_default_template_passes_quality_hints():
@@ -33,6 +36,8 @@ def test_default_template_passes_quality_hints():
     codes = {h["code"] for h in hints}
     assert "MISSING_BUY_SELL_COLUMNS" not in codes
     assert "MISSING_OUTPUT" not in codes
+    assert "EXECUTION_COLUMNS_IGNORED_FOR_INDICATOR" not in codes
+    assert "STRATEGY_ANNOTATIONS_IGNORED_FOR_INDICATOR" not in codes
 
 
 def test_default_template_executes_in_sandbox():
@@ -51,7 +56,7 @@ def test_default_template_executes_in_sandbox():
     out = env.get("output")
     assert isinstance(out, dict)
     assert out.get("plots")
+    assert out.get("signals")
     executed = env["df"]
     for col in ("open_long", "close_long", "open_short", "close_short"):
-        assert col in executed.columns
-        assert len(executed[col]) == len(df)
+        assert col not in executed.columns

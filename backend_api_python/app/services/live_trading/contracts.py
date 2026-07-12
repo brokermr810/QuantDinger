@@ -23,6 +23,7 @@ class OrderIntent:
     pos_side: str = ""
     reduce_only: bool = False
     client_order_id: Optional[str] = None
+    fallback_client_order_id: Optional[str] = None
     leverage: float = 1.0
     margin_mode: str = "cross"
     post_only: bool = False

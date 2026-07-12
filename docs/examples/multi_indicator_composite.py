@@ -1,125 +1,141 @@
-# ============================================================
-# 多指标组合策略（文档同步版）
-# Multi-Indicator Composite Strategy (Doc-Aligned Example)
-# ============================================================
-#
-# 示例目标:
-# 1. 演示如何把 `# @param`、`# @strategy` 和平台 UI 对齐
-# 2. 演示如何组合均线、RSI、MACD、成交量过滤
-# 3. 演示如何把原始条件整理成更稳定的边缘触发信号
-#
-# ============================================================
+"""
+QuantDinger chart-only indicator example: multi-indicator composite.
 
-my_indicator_name = "多指标组合策略"
-my_indicator_description = "均线、RSI、MACD 与成交量过滤共同参与的组合信号示例。"
+This file demonstrates the current indicator contract:
+- read OHLCV data from df
+- read visual parameters from params
+- compute plots and chart markers
+- return output
+- do not create orders, positions, stop loss, take profit, or backtest columns
 
-# --- QuantDinger execution contract (v1) ---
-# signal_form: four_way
-# exit_owner: engine
-# flip_mode: R2
+To trade this idea, convert it into a Script Strategy first.
+"""
 
-# === 参数声明 ===
-# @param sma_short int 10 短期均线周期
-# @param sma_long int 30 长期均线周期
-# @param rsi_period int 14 RSI周期
-# @param rsi_oversold int 30 RSI超卖阈值
-# @param rsi_overbought int 70 RSI超买阈值
-# @param use_macd bool true 是否使用MACD过滤
-# @param use_volume bool false 是否使用成交量过滤
-# @param volume_mult float 1.5 成交量放大倍数
+my_indicator_name = "Multi Indicator Composite"
+my_indicator_description = (
+    "Chart-only composite of SMA trend, RSI regime, MACD momentum, and volume filter."
+)
 
-# === 平台默认策略配置 ===
-# @strategy stopLossPct 0.025
-# @strategy takeProfitPct 0.06
-# @strategy entryPct 0.2
-# @strategy trailingEnabled true
-# @strategy trailingStopPct 0.02
-# @strategy trailingActivationPct 0.04
-# @strategy tradeDirection both
-
-# 说明：本示例使用四路执行信号；固定止损、止盈和追踪止损由引擎负责。
-# output["signals"] 只负责图表标记，不参与下单。
+# @param sma_short int 10 Short SMA period
+# @param sma_long int 30 Long SMA period
+# @param rsi_period int 14 RSI period
+# @param rsi_oversold int 30 RSI oversold level
+# @param rsi_overbought int 70 RSI overbought level
+# @param use_macd bool true Require MACD direction confirmation
+# @param use_volume bool false Require volume expansion for buy markers
+# @param volume_mult float 1.5 Volume expansion multiplier
 
 df = df.copy()
 
-# === 获取参数 ===
-sma_short_period = int(params.get('sma_short', 10))
-sma_long_period = int(params.get('sma_long', 30))
-rsi_period = int(params.get('rsi_period', 14))
-rsi_oversold = int(params.get('rsi_oversold', 30))
-rsi_overbought = int(params.get('rsi_overbought', 70))
-use_macd = bool(params.get('use_macd', True))
-use_volume = bool(params.get('use_volume', False))
-volume_mult = float(params.get('volume_mult', 1.5))
+sma_short_period = int(params.get("sma_short", 10))
+sma_long_period = int(params.get("sma_long", 30))
+rsi_period = int(params.get("rsi_period", 14))
+rsi_oversold = float(params.get("rsi_oversold", 30))
+rsi_overbought = float(params.get("rsi_overbought", 70))
+use_macd = bool(params.get("use_macd", True))
+use_volume = bool(params.get("use_volume", False))
+volume_mult = float(params.get("volume_mult", 1.5))
 
-# === 计算均线 ===
-sma_short = df["close"].rolling(sma_short_period).mean()
-sma_long = df["close"].rolling(sma_long_period).mean()
+close = df["close"]
+high = df["high"]
+low = df["low"]
+volume = df["volume"]
 
-# === 计算RSI ===
-delta = df["close"].diff()
-gain = delta.where(delta > 0, 0).rolling(window=rsi_period).mean()
-loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_period).mean()
+sma_short = close.rolling(sma_short_period).mean()
+sma_long = close.rolling(sma_long_period).mean()
+
+delta = close.diff()
+gain = delta.clip(lower=0).rolling(rsi_period).mean()
+loss = (-delta.clip(upper=0)).rolling(rsi_period).mean()
 rs = gain / loss.replace(0, np.nan)
 rsi = 100 - (100 / (1 + rs))
 
-# === 计算MACD ===
-exp1 = df["close"].ewm(span=12, adjust=False).mean()
-exp2 = df["close"].ewm(span=26, adjust=False).mean()
-macd = exp1 - exp2
+ema_fast = close.ewm(span=12, adjust=False).mean()
+ema_slow = close.ewm(span=26, adjust=False).mean()
+macd = ema_fast - ema_slow
 macd_signal = macd.ewm(span=9, adjust=False).mean()
+macd_hist = macd - macd_signal
 
-# === 计算成交量均线 ===
-volume_ma = df["volume"].rolling(20).mean()
+volume_ma = volume.rolling(20).mean()
 
-# === 原始条件 ===
-ma_golden = (sma_short > sma_long) & (sma_short.shift(1) <= sma_long.shift(1))
-ma_death = (sma_short < sma_long) & (sma_short.shift(1) >= sma_long.shift(1))
-rsi_buy = rsi < rsi_oversold
-rsi_sell = rsi > rsi_overbought
-macd_up = macd > macd_signal
-macd_down = macd < macd_signal
-volume_up = df["volume"] > volume_ma * volume_mult
+trend_up = sma_short > sma_long
+trend_down = sma_short < sma_long
+rsi_buy_zone = rsi <= rsi_oversold
+rsi_sell_zone = rsi >= rsi_overbought
+macd_up = macd_hist > 0
+macd_down = macd_hist < 0
+volume_ok = volume > (volume_ma * volume_mult)
 
-# === 组合条件 ===
-raw_buy = ma_golden | rsi_buy
-raw_sell = ma_death | rsi_sell
+buy_condition = (trend_up & rsi_buy_zone).fillna(False)
+sell_condition = (trend_down & rsi_sell_zone).fillna(False)
 
 if use_macd:
-    raw_buy = raw_buy & macd_up
-    raw_sell = raw_sell | macd_down
+    buy_condition = buy_condition & macd_up.fillna(False)
+    sell_condition = sell_condition & macd_down.fillna(False)
 
 if use_volume:
-    raw_buy = raw_buy & volume_up
+    buy_condition = buy_condition & volume_ok.fillna(False)
 
-# === 四路边缘触发执行信号 ===
-def edge(signal):
-    signal = signal.fillna(False).astype(bool)
-    return signal & ~signal.shift(1).fillna(False)
+buy_edge = buy_condition & ~buy_condition.shift(1).fillna(False)
+sell_edge = sell_condition & ~sell_condition.shift(1).fillna(False)
 
+buy_marks = [
+    float(low.iloc[i] * 0.995) if bool(buy_edge.iloc[i]) else None
+    for i in range(len(df))
+]
+sell_marks = [
+    float(high.iloc[i] * 1.005) if bool(sell_edge.iloc[i]) else None
+    for i in range(len(df))
+]
 
-open_long = edge(raw_buy)
-open_short = edge(raw_sell)
-df["open_long"] = open_long
-df["close_short"] = open_long
-df["open_short"] = open_short
-df["close_long"] = open_short
+trend_lamp = [
+    "up" if bool(trend_up.fillna(False).iloc[i]) else "down" if bool(trend_down.fillna(False).iloc[i]) else "flat"
+    for i in range(len(df))
+]
 
-# === 买卖标记点 ===
-buy_marks = [df["low"].iloc[i] * 0.995 if df["open_long"].iloc[i] else None for i in range(len(df))]
-sell_marks = [df["high"].iloc[i] * 1.005 if df["open_short"].iloc[i] else None for i in range(len(df))]
-
-# === 图表输出配置 ===
 output = {
     "name": my_indicator_name,
+    "description": my_indicator_description,
     "plots": [
-        {"name": f"SMA{sma_short_period}", "data": sma_short.fillna(0).tolist(), "color": "#FF9800", "overlay": True},
-        {"name": f"SMA{sma_long_period}", "data": sma_long.fillna(0).tolist(), "color": "#3F51B5", "overlay": True},
-        {"name": "RSI", "data": rsi.fillna(50).tolist(), "color": "#722ED1", "overlay": False},
-        {"name": "MACD", "data": macd.fillna(0).tolist(), "color": "#13C2C2", "overlay": False}
+        {
+            "name": f"SMA {sma_short_period}",
+            "data": sma_short.fillna(0).tolist(),
+            "color": "#f59e0b",
+            "type": "line",
+            "overlay": True,
+        },
+        {
+            "name": f"SMA {sma_long_period}",
+            "data": sma_long.fillna(0).tolist(),
+            "color": "#2563eb",
+            "type": "line",
+            "overlay": True,
+        },
+        {
+            "name": "RSI",
+            "data": rsi.fillna(50).tolist(),
+            "color": "#8b5cf6",
+            "type": "line",
+            "overlay": False,
+        },
+        {
+            "name": "MACD Histogram",
+            "data": macd_hist.fillna(0).tolist(),
+            "color": "#14b8a6",
+            "type": "histogram",
+            "overlay": False,
+        },
     ],
     "signals": [
-        {"type": "buy", "text": "B", "data": buy_marks, "color": "#00E676"},
-        {"type": "sell", "text": "S", "data": sell_marks, "color": "#FF5252"}
-    ]
+        {"type": "buy", "text": "Composite Buy", "data": buy_marks, "color": "#22c55e"},
+        {"type": "sell", "text": "Composite Sell", "data": sell_marks, "color": "#ef4444"},
+    ],
+    "layers": [
+        {
+            "name": "Trend Lamp",
+            "type": "lamp",
+            "data": trend_lamp,
+            "colors": {"up": "#16a34a", "down": "#dc2626", "flat": "#6b7280"},
+        }
+    ],
 }

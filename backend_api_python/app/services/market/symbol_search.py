@@ -9,14 +9,23 @@ from app.data.market_symbols_seed import (
     search_symbols as seed_search_symbols,
 )
 from app.services.symbol_name import persist_seed_name
+from app.services.market_context import (
+    canonical_crypto_symbol,
+    default_crypto_exchange_id,
+    normalize_exchange_id,
+    normalize_market_type,
+    SUPPORTED_CRYPTO_EXCHANGE_IDS,
+)
 from app.utils.cache import CacheManager
+from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 SYMBOL_SEARCH_CACHE_TTL_SEC = 21600
 _market_cache = CacheManager()
-_crypto_markets_cache: dict = {"data": None, "ts": 0}
+_crypto_markets_cache: dict[str, dict] = {}
+CRYPTO_EXCHANGE_FALLBACK_ORDER = ("binance", "bitget", "bybit", "okx", "gate", "htx")
 
 
 def dedupe_symbol_results(items: Iterable[dict], limit: int) -> list:
@@ -29,23 +38,52 @@ def dedupe_symbol_results(items: Iterable[dict], limit: int) -> list:
         name = (item.get("name") or "").strip()
         if not market or not symbol:
             continue
-        key = (market, symbol)
+        exchange_id = normalize_exchange_id(item.get("exchange_id") or item.get("exchange"))
+        market_type = normalize_market_type(item.get("market_type"), market=market)
+        instrument_id = str(item.get("instrument_id") or item.get("instrumentId") or "").strip()
+        settle_currency = str(item.get("settle_currency") or item.get("settleCurrency") or "").strip().upper()
+        asset_class = str(item.get("asset_class") or "crypto").strip().lower()
+        key = (market, symbol, exchange_id, market_type, instrument_id)
         if key in seen:
             continue
         seen.add(key)
-        out.append({"market": market, "symbol": symbol, "name": name})
+        out.append({
+            "market": market,
+            "symbol": symbol,
+            "name": name,
+            "exchange_id": exchange_id,
+            "market_type": market_type,
+            "instrument_id": instrument_id,
+            "settle_currency": settle_currency,
+            "asset_class": asset_class,
+        })
         if len(out) >= limit:
             break
     return out
 
 
-def search_market_symbols(market: str, keyword: str, limit: int = 20) -> list:
-    """Search local seed first, then use market-specific external fallbacks."""
+def search_market_symbols(
+    market: str,
+    keyword: str,
+    limit: int = 20,
+    *,
+    exchange_id: str = "",
+    market_type: str = "",
+) -> list:
+    """Search the local catalog, using external fallbacks only for equities."""
     market = (market or "").strip()
     keyword = (keyword or "").strip().upper()
     limit = max(1, int(limit or 20))
     if not market or not keyword:
         return []
+
+    if market == "Crypto":
+        exchange_id = normalize_exchange_id(exchange_id) or default_crypto_exchange_id()
+        if exchange_id not in SUPPORTED_CRYPTO_EXCHANGE_IDS:
+            return []
+        market_type = normalize_market_type(market_type, market=market)
+        out = _search_cached_crypto_symbols(keyword, limit, exchange_id, market_type)
+        return dedupe_symbol_results(out, limit)
 
     out = dedupe_symbol_results(
         seed_search_symbols(market=market, keyword=keyword, limit=limit),
@@ -55,42 +93,99 @@ def search_market_symbols(market: str, keyword: str, limit: int = 20) -> list:
         return out
 
     existing = {r["symbol"] for r in out}
-    if market == "Crypto":
-        out.extend(_search_crypto_exchange(keyword, limit - len(out), existing))
-    elif market in {"USStock", "CNStock", "HKStock"}:
+    if market in {"USStock", "CNStock", "HKStock"}:
         out.extend(_search_external_symbols(market, keyword, limit - len(out), existing))
 
     return dedupe_symbol_results(out, limit)
 
 
-def find_market_symbol(market: str, symbol: str) -> dict | None:
+def find_market_symbol(
+    market: str,
+    symbol: str,
+    *,
+    exchange_id: str = "",
+    market_type: str = "",
+) -> dict | None:
     """Return an exact symbol match from local seed or supported external sources."""
     market = (market or "").strip()
     symbol = (symbol or "").strip().upper()
     if not market or not symbol:
         return None
 
-    local = dedupe_symbol_results(
-        seed_search_symbols(market=market, keyword=symbol, limit=10),
-        10,
-    )
-    exact = _first_exact_match(local, market, symbol)
-    if exact:
-        return exact
-
     if market == "Crypto":
-        rows = _search_crypto_exchange(symbol, 10, set())
+        exchange_id = normalize_exchange_id(exchange_id) or default_crypto_exchange_id()
+        if exchange_id not in SUPPORTED_CRYPTO_EXCHANGE_IDS:
+            return None
+        market_type = normalize_market_type(market_type, market=market)
+        rows = _search_cached_crypto_symbols(symbol, 20, exchange_id, market_type)
     elif market in {"USStock", "CNStock", "HKStock"}:
+        local = dedupe_symbol_results(
+            seed_search_symbols(market=market, keyword=symbol, limit=10),
+            10,
+        )
+        exact = _first_exact_match(local, market, symbol)
+        if exact:
+            return exact
         rows = _search_external_symbols(market, symbol, 10, set())
     else:
-        rows = []
+        rows = dedupe_symbol_results(
+            seed_search_symbols(market=market, keyword=symbol, limit=10),
+            10,
+        )
 
     return _first_exact_match(rows, market, symbol)
 
 
+def find_available_crypto_symbol(
+    symbol: str,
+    *,
+    preferred_exchange_id: str = "",
+    preferred_market_type: str = "spot",
+) -> dict | None:
+    """Find a crypto pair on a concrete supported exchange and market type."""
+    preferred_exchange_id = normalize_exchange_id(preferred_exchange_id) or default_crypto_exchange_id()
+    preferred_market_type = normalize_market_type(preferred_market_type, market="Crypto")
+    candidates = [(preferred_exchange_id, preferred_market_type)]
+    candidates.append((preferred_exchange_id, "swap" if preferred_market_type == "spot" else "spot"))
+    for exchange_id in CRYPTO_EXCHANGE_FALLBACK_ORDER:
+        for market_type in ("spot", "swap"):
+            candidate = (exchange_id, market_type)
+            if candidate not in candidates:
+                candidates.append(candidate)
+
+    for exchange_id, market_type in candidates:
+        matched = find_market_symbol(
+            "Crypto",
+            symbol,
+            exchange_id=exchange_id,
+            market_type=market_type,
+        )
+        if matched:
+            return matched
+    return None
+
+
 def get_hot_symbols(market: str, limit: int = 10) -> list:
-    """Return curated hot symbols for a market."""
-    return seed_get_hot_symbols(market=(market or "").strip(), limit=int(limit or 10))
+    """Return curated hot symbols backed by a concrete market-data identity."""
+    market = (market or "").strip()
+    limit = max(1, int(limit or 10))
+    curated = seed_get_hot_symbols(market=market, limit=limit)
+    if market != "Crypto":
+        return curated
+
+    available = []
+    for item in curated:
+        symbol = canonical_crypto_symbol(item.get("symbol"))
+        matched = find_available_crypto_symbol(
+            symbol,
+            preferred_exchange_id=default_crypto_exchange_id(),
+            preferred_market_type="spot",
+        )
+        if not matched:
+            continue
+        matched["name"] = (item.get("name") or matched.get("name") or symbol).strip()
+        available.append(matched)
+    return dedupe_symbol_results(available, limit)
 
 
 def _first_exact_match(items: Iterable[dict], market: str, symbol: str) -> dict | None:
@@ -100,41 +195,65 @@ def _first_exact_match(items: Iterable[dict], market: str, symbol: str) -> dict 
         item_market = (item.get("market") or "").strip()
         item_symbol = (item.get("symbol") or "").strip().upper()
         if item_market == want_market and item_symbol == want_symbol:
-            return {
-                "market": item_market,
-                "symbol": item_symbol,
-                "name": (item.get("name") or "").strip(),
-            }
+            return dict(item)
     return None
 
 
-def _search_crypto_exchange(keyword: str, limit: int, existing: set) -> list:
+def _search_crypto_exchange(
+    keyword: str,
+    limit: int,
+    existing: set,
+    exchange_id: str,
+    market_type: str,
+) -> list:
     """Search exchange markets for active USDT crypto pairs."""
     if limit <= 0:
         return []
     try:
         import ccxt  # type: ignore
-        from app.config.data_sources import CCXTConfig
+        from app.data_sources.crypto import resolve_ccxt_for_live_trading
 
         now = time.time()
-        if _crypto_markets_cache["data"] and now - _crypto_markets_cache["ts"] < 14400:
-            markets = _crypto_markets_cache["data"]
+        exchange_id = normalize_exchange_id(exchange_id) or default_crypto_exchange_id()
+        market_type = normalize_market_type(market_type, market="Crypto")
+        cache_key = f"{exchange_id}:{market_type}"
+        cached = _crypto_markets_cache.get(cache_key) or {}
+        if cached.get("data") and now - float(cached.get("ts") or 0) < 14400:
+            markets = cached["data"]
         else:
-            exchange_cls = getattr(ccxt, CCXTConfig.DEFAULT_EXCHANGE, None) or ccxt.gate
-            ex = exchange_cls()
+            ccxt_id, options = resolve_ccxt_for_live_trading(exchange_id, market_type)
+            exchange_cls = getattr(ccxt, ccxt_id)
+            config = {"enableRateLimit": True}
+            if options:
+                config["options"] = options
+            ex = exchange_cls(config)
             ex.load_markets()
             markets = []
             for sym, info in ex.markets.items():
                 if not info.get("active") or info.get("quote", "") != "USDT":
                     continue
+                is_target_type = bool(info.get("spot")) if market_type == "spot" else bool(info.get("swap"))
+                if not is_target_type:
+                    continue
+                canonical_symbol = canonical_crypto_symbol(sym)
                 markets.append({
-                    "symbol": sym,
+                    "symbol": canonical_symbol,
                     "base": info.get("base", ""),
                     "name": info.get("base", sym),
+                    "exchange_id": exchange_id,
+                    "market_type": market_type,
+                    "instrument_id": str(info.get("id") or sym),
+                    "settle_currency": str(info.get("settle") or info.get("quote") or "").upper(),
+                    "asset_class": _classify_asset(info),
                 })
-            _crypto_markets_cache["data"] = markets
-            _crypto_markets_cache["ts"] = now
-            logger.info("Cached %d USDT crypto pairs from %s", len(markets), CCXTConfig.DEFAULT_EXCHANGE)
+            _crypto_markets_cache[cache_key] = {"data": markets, "ts": now}
+            _persist_crypto_markets(markets, exchange_id, market_type)
+            logger.info(
+                "Cached %d crypto instruments from %s/%s",
+                len(markets),
+                exchange_id,
+                market_type,
+            )
 
         kw = keyword.upper().replace("/USDT", "").replace("/", "")
         results = []
@@ -143,13 +262,103 @@ def _search_crypto_exchange(keyword: str, limit: int, existing: set) -> list:
             if symbol in existing:
                 continue
             if kw in item["base"].upper() or kw in symbol.upper():
-                results.append({"market": "Crypto", "symbol": symbol, "name": item["name"]})
+                results.append({"market": "Crypto", **item})
                 if len(results) >= limit:
                     break
         return results
     except Exception as exc:
         logger.debug("Crypto exchange symbol search failed: %s", exc)
         return []
+
+
+def _search_cached_crypto_symbols(
+    keyword: str,
+    limit: int,
+    exchange_id: str,
+    market_type: str,
+) -> list:
+    pattern = f"%{str(keyword or '').strip().upper()}%"
+    try:
+        with get_db_connection() as db:
+            cur = db.cursor()
+            cur.execute(
+                """
+                SELECT market, symbol, name, exchange AS exchange_id, market_type,
+                       instrument_id, settle_currency, asset_class
+                FROM qd_market_symbols
+                WHERE market = 'Crypto' AND is_active = 1
+                  AND exchange = ? AND market_type = ?
+                  AND (UPPER(symbol) LIKE ? OR UPPER(name) LIKE ?)
+                ORDER BY CASE WHEN UPPER(symbol) = UPPER(?) THEN 0 ELSE 1 END,
+                         sort_order DESC, symbol ASC
+                LIMIT ?
+                """,
+                (exchange_id, market_type, pattern, pattern, keyword, max(1, limit)),
+            )
+            rows = cur.fetchall() or []
+            cur.close()
+        return [dict(row) for row in rows]
+    except Exception as exc:
+        logger.debug("Cached crypto symbol search failed: %s", exc)
+        return []
+
+
+def _persist_crypto_markets(markets: list, exchange_id: str, market_type: str) -> None:
+    if not markets:
+        return
+    try:
+        with get_db_connection() as db:
+            cur = db.cursor()
+            cur.execute(
+                """
+                UPDATE qd_market_symbols SET is_active = 0
+                WHERE market = 'Crypto' AND exchange = ? AND market_type = ?
+                """,
+                (exchange_id, market_type),
+            )
+            for item in markets:
+                cur.execute(
+                    """
+                    INSERT INTO qd_market_symbols (
+                        market, symbol, name, exchange, market_type, instrument_id,
+                        settle_currency, currency, asset_class, is_active, is_hot, sort_order
+                    )
+                    VALUES ('Crypto', ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 0)
+                    ON CONFLICT (market, symbol, exchange, market_type, instrument_id) DO UPDATE
+                      SET name = EXCLUDED.name,
+                          settle_currency = EXCLUDED.settle_currency,
+                          currency = EXCLUDED.currency,
+                          asset_class = EXCLUDED.asset_class,
+                          is_active = 1
+                    """,
+                    (
+                        item.get("symbol") or "",
+                        item.get("name") or item.get("base") or "",
+                        exchange_id,
+                        market_type,
+                        item.get("instrument_id") or "",
+                        item.get("settle_currency") or "",
+                        item.get("settle_currency") or "",
+                        item.get("asset_class") or "crypto",
+                    ),
+                )
+            db.commit()
+            cur.close()
+    except Exception as exc:
+        logger.debug("Crypto market catalog persist failed for %s/%s: %s", exchange_id, market_type, exc)
+
+
+def _classify_asset(info: dict) -> str:
+    raw = info.get("info") if isinstance(info.get("info"), dict) else {}
+    inst_category = str(raw.get("instCategory") or "").strip()
+    fields = " ".join(str(raw.get(key) or "") for key in (
+        "symbolType", "underlyingType", "assetClass", "category", "contractType", "businessType"
+    )).lower()
+    if inst_category == "3" or any(token in fields for token in ("stock", "xstock", "equity")):
+        return "equity"
+    if str(raw.get("isRwa") or "").strip().upper() == "YES":
+        return "rwa"
+    return "crypto"
 
 
 def _df_records(df) -> list:

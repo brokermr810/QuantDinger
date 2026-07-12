@@ -102,6 +102,34 @@ def get_security_config():
         return jsonify({'code': 0, 'msg': str(e), 'data': None}), 500
 
 
+@auth_blp.route('/turnstile-clearance', methods=['POST'])
+def issue_turnstile_clearance():
+    """Exchange a fresh Turnstile token for a short-lived local clearance."""
+    ip_address = _get_client_ip()
+
+    try:
+        from app.services.security_service import get_security_service
+        security = get_security_service()
+
+        data = request.get_json() or {}
+        turnstile_token = data.get('turnstile_token') or data.get('token')
+        turnstile_ok, turnstile_msg = security.verify_turnstile(turnstile_token, ip_address)
+        if not turnstile_ok:
+            return jsonify({'code': 0, 'msg': turnstile_msg, 'data': None}), 400
+
+        return jsonify({
+            'code': 1,
+            'msg': 'success',
+            'data': {
+                'turnstile_clearance': security.issue_turnstile_clearance(ip_address),
+                'expires_in': security.turnstile_clearance_ttl_seconds,
+            },
+        })
+    except Exception as e:
+        logger.error(f"issue_turnstile_clearance error: {e}")
+        return jsonify({'code': 0, 'msg': str(e), 'data': None}), 500
+
+
 # =============================================================================
 # Login Endpoint (Enhanced with security)
 # =============================================================================
@@ -134,12 +162,17 @@ def login():
         username = data.get('username') or data.get('account')
         password = data.get('password')
         turnstile_token = data.get('turnstile_token')
+        turnstile_clearance = data.get('turnstile_clearance')
         
         if not username or not password:
             return jsonify({'code': 400, 'msg': 'Missing username/email or password', 'data': None}), 400
         
         # Step 1: Verify Turnstile (if enabled)
-        turnstile_ok, turnstile_msg = security.verify_turnstile(turnstile_token, ip_address)
+        turnstile_ok, turnstile_msg = security.verify_turnstile_or_clearance(
+            token=turnstile_token,
+            clearance=turnstile_clearance,
+            ip_address=ip_address,
+        )
         if not turnstile_ok:
             return jsonify({'code': 0, 'msg': turnstile_msg, 'data': None}), 400
         
@@ -172,8 +205,8 @@ def login():
             except Exception as e:
                 logger.warning(f"Multi-user auth failed, trying legacy: {e}")
         
-        # Fallback to legacy single-user mode
-        if not user:
+        # Legacy env-admin auth is only valid in explicit single-user mode.
+        if not user and _is_single_user_mode():
             user = authenticate_legacy(username, password)
         
         if not user:
@@ -591,6 +624,7 @@ def send_verification_code():
         email = (data.get('email') or '').strip().lower()
         code_type = data.get('type', 'register')
         turnstile_token = data.get('turnstile_token')
+        turnstile_clearance = data.get('turnstile_clearance')
         
         # Validate email
         if not email or not email_service.is_valid_email(email):
@@ -612,7 +646,11 @@ def send_verification_code():
         
         # Verify Turnstile (skip for authenticated change_password requests)
         if not skip_turnstile:
-            turnstile_ok, turnstile_msg = security.verify_turnstile(turnstile_token, ip_address)
+            turnstile_ok, turnstile_msg = security.verify_turnstile_or_clearance(
+                token=turnstile_token,
+                clearance=turnstile_clearance,
+                ip_address=ip_address,
+            )
             if not turnstile_ok:
                 return jsonify({'code': 0, 'msg': turnstile_msg, 'data': None}), 400
         

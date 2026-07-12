@@ -691,6 +691,7 @@ class BillingService:
             'feature_costs': {
                 'ai_analysis': config.get('cost_ai_analysis', 0),
                 'ai_code_gen': config.get('cost_ai_code_gen', 0),
+                'ai_indicator_to_strategy': config.get('cost_ai_indicator_to_strategy', 0),
                 'ai_tuning': config.get('cost_ai_tuning', 0),
                 'ai_copilot_chat': config.get('cost_ai_copilot_chat', 0),
                 'ai_copilot_image': config.get('cost_ai_copilot_image', 0),

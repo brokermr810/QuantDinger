@@ -5,8 +5,9 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 from typing import Optional
 
 from app.data.market_symbols_seed import get_symbol_name as seed_get_symbol_name
-from app.services.market.symbol_search import find_market_symbol
+from app.services.market.symbol_search import find_available_crypto_symbol, find_market_symbol
 from app.services.symbol_name import normalize_crypto_symbol, persist_seed_name, resolve_symbol_name
+from app.services.market_context import MarketContext, SUPPORTED_CRYPTO_EXCHANGE_IDS
 from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
 
@@ -43,22 +44,50 @@ def validate_watchlist_pair(market: str, symbol: str) -> Optional[str]:
 
 
 def list_watchlist(user_id: int) -> list:
-    """Return a user's watchlist and backfill missing display names."""
+    """Return one asset-level row per market/symbol pair."""
     with get_db_connection() as db:
         cur = db.cursor()
         cur.execute(
-            "SELECT id, market, symbol, name FROM qd_watchlist WHERE user_id = ? ORDER BY id DESC",
+            """
+            SELECT id, market, symbol, name, exchange_id, market_type,
+                   instrument_id, settle_currency
+            FROM qd_watchlist
+            WHERE user_id = ?
+            ORDER BY id DESC
+            """,
             (user_id,),
         )
-        rows = cur.fetchall() or []
-        for row in rows:
+        stored_rows = cur.fetchall() or []
+        rows = []
+        seen = set()
+        for row in stored_rows:
+            asset_key = (row.get("market"), row.get("symbol"))
+            if asset_key in seen:
+                continue
+            seen.add(asset_key)
+            row.update({
+                "exchange_id": "",
+                "market_type": "",
+                "instrument_id": "",
+            })
             _backfill_row_name(cur, user_id, row)
+            rows.append(row)
         db.commit()
         cur.close()
     return rows
 
 
-def add_watchlist_item(user_id: int, market: str, raw_symbol: str, name_in: str = "") -> tuple[bool, str]:
+def add_watchlist_item(
+    user_id: int,
+    market: str,
+    raw_symbol: str,
+    name_in: str = "",
+    *,
+    exchange_id: str = "",
+    market_type: str = "",
+    instrument_id: str = "",
+    settle_currency: str = "",
+) -> tuple[bool, str]:
     """Validate and persist a watchlist item."""
     market = (market or "").strip()
     symbol = normalize_symbol(raw_symbol)
@@ -67,13 +96,35 @@ def add_watchlist_item(user_id: int, market: str, raw_symbol: str, name_in: str 
 
     if market == "Crypto":
         symbol = normalize_crypto_symbol(symbol)
+    context = MarketContext.from_mapping({
+        "market": market,
+        "symbol": symbol,
+        "exchange_id": exchange_id,
+        "market_type": market_type,
+        "instrument_id": instrument_id,
+        "settle_currency": settle_currency,
+    })
+    if market == "Crypto" and context.exchange_id not in SUPPORTED_CRYPTO_EXCHANGE_IDS:
+        return False, f"Unsupported crypto exchange: {context.exchange_id}"
 
     validation_err = validate_watchlist_pair(market, symbol)
     if validation_err:
         logger.info("Rejecting watchlist add for user %s: %s", user_id, validation_err)
         return False, validation_err
 
-    matched = find_market_symbol(market, symbol)
+    if market == "Crypto":
+        matched = find_available_crypto_symbol(
+            symbol,
+            preferred_exchange_id=context.exchange_id,
+            preferred_market_type=context.market_type,
+        )
+    else:
+        matched = find_market_symbol(
+            market,
+            symbol,
+            exchange_id=context.exchange_id,
+            market_type=context.market_type,
+        )
     if not matched:
         err = (
             f"Symbol '{symbol}' not found on {market}. "
@@ -89,26 +140,52 @@ def add_watchlist_item(user_id: int, market: str, raw_symbol: str, name_in: str 
     )
     name = (name_in or "").strip() or resolved or symbol
     persist_seed_name(market, symbol, name)
+    settle_currency = str((matched or {}).get("settle_currency") or context.settle_currency or "").strip().upper()
 
     with get_db_connection() as db:
         cur = db.cursor()
         cur.execute(
+            "DELETE FROM qd_watchlist WHERE user_id = ? AND market = ? AND symbol = ?",
+            (user_id, market, symbol),
+        )
+        cur.execute(
             """
-            INSERT INTO qd_watchlist (user_id, market, symbol, name, created_at, updated_at)
-            VALUES (?, ?, ?, ?, NOW(), NOW())
-            ON CONFLICT(user_id, market, symbol) DO UPDATE SET
+            INSERT INTO qd_watchlist (
+                user_id, market, symbol, name, exchange_id, market_type,
+                instrument_id, settle_currency, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+            ON CONFLICT(user_id, market, symbol, exchange_id, market_type, instrument_id) DO UPDATE SET
                 name = excluded.name,
+                settle_currency = excluded.settle_currency,
                 updated_at = NOW()
             """,
-            (user_id, market, symbol, name),
+            (
+                user_id,
+                market,
+                symbol,
+                name,
+                "",
+                "spot",
+                "",
+                settle_currency,
+            ),
         )
         db.commit()
         cur.close()
     return True, "success"
 
 
-def remove_watchlist_item(user_id: int, market: str, raw_symbol: str) -> bool:
-    """Remove a watchlist item, keeping legacy crypto rows removable."""
+def remove_watchlist_item(
+    user_id: int,
+    market: str,
+    raw_symbol: str,
+    *,
+    exchange_id: str = "",
+    market_type: str = "",
+    instrument_id: str = "",
+) -> bool:
+    """Remove an asset-level watchlist item."""
     market = (market or "").strip()
     raw_symbol = normalize_symbol(raw_symbol)
     canonical_symbol = normalize_crypto_symbol(raw_symbol) if market == "Crypto" else raw_symbol
@@ -146,15 +223,32 @@ def get_user_watchlist_pairs(user_id: int) -> list:
     with get_db_connection() as db:
         cur = db.cursor()
         cur.execute(
-            "SELECT market, symbol FROM qd_watchlist WHERE user_id = ?",
+            """
+            SELECT market, symbol, exchange_id, market_type,
+                   instrument_id, settle_currency
+            FROM qd_watchlist
+            WHERE user_id = ?
+            """,
             (user_id,),
         )
         rows = cur.fetchall() or []
         cur.close()
-    return [
-        {"market": (r.get("market") or "").strip(), "symbol": (r.get("symbol") or "").strip()}
-        for r in rows
-    ]
+    out = []
+    seen = set()
+    for row in rows:
+        asset_key = (row.get("market"), row.get("symbol"))
+        if asset_key in seen:
+            continue
+        seen.add(asset_key)
+        out.append({
+            "market": row.get("market") or "",
+            "symbol": row.get("symbol") or "",
+            "exchange_id": "",
+            "market_type": "",
+            "instrument_id": "",
+            "settle_currency": row.get("settle_currency") or "",
+        })
+    return out
 
 
 def resolve_symbol_name_bounded(market: str, symbol: str, timeout_sec: float = 4.0) -> Optional[str]:

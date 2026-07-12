@@ -146,10 +146,11 @@ Restart the IDE, then ask things like:
   breakout indicator."*
 - *"Pull the last 90 daily candles for BTC/USDT and tell me what the regime
   detector says."*
-- *"Backtest the indicator with `strict_mode=true` on ETH/USDT 4h between
+- *"Convert the Keltner indicator idea into a long-only ScriptStrategy, then
+  backtest that script with `strict_mode=true` on ETH/USDT 4h between
   2024-01-01 and 2024-06-30; use `wait_for_job` for the result."*
-- *"Create a strategy named **eth-trend-bot**, use the indicator I just
-  saved, leave it in `stopped` state."*
+- *"Create a ScriptStrategy named **eth-trend-bot** with this strategy code,
+  and leave it in `stopped` state."*
 - *"Call `runtime_overview` and summarize what is currently running."*
 - *"Stop strategy 123 with `stop_strategy(confirm_stop=true)` because I asked
   you to stop it."*

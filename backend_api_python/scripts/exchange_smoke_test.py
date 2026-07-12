@@ -479,6 +479,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             "tests/test_exchange_offline_contract_fixtures.py",
             "tests/test_exchange_order_param_contracts.py",
             "tests/test_exchange_position_contract_fixtures.py",
+            "tests/test_live_trading_executors_v2.py",
+            "tests/test_pending_order_worker_alpaca_sync.py",
+            "tests/test_pending_order_worker_live_sync.py",
+            "tests/test_ibkr_order_status.py",
+            "tests/test_trading_executor_order_contract.py",
+            "tests/release_gate/test_live_execution_release_gate.py",
             "-v",
         ]
         print("+", " ".join(cmd), flush=True)

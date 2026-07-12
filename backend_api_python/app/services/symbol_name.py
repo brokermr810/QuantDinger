@@ -66,9 +66,12 @@ def persist_seed_name(market: str, symbol: str, name: str) -> None:
             cur = db.cursor()
             cur.execute(
                 """
-                INSERT INTO qd_market_symbols (market, symbol, name, is_active, is_hot, sort_order)
-                VALUES (?, ?, ?, 1, 0, 0)
-                ON CONFLICT (market, symbol) DO UPDATE
+                INSERT INTO qd_market_symbols (
+                    market, symbol, name, exchange, market_type, instrument_id,
+                    is_active, is_hot, sort_order
+                )
+                VALUES (?, ?, ?, '', 'spot', '', 1, 0, 0)
+                ON CONFLICT (market, symbol, exchange, market_type, instrument_id) DO UPDATE
                   SET name = EXCLUDED.name
                   WHERE qd_market_symbols.name IS NULL
                      OR qd_market_symbols.name = ''

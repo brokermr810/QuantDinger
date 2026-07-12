@@ -1,7 +1,4 @@
-"""
-安全的代码执行工具
-提供超时、资源限制、沙箱环境和子进程隔离
-"""
+"""Safe execution helpers for user-provided strategy and indicator code."""
 import signal
 import sys
 import os
@@ -17,11 +14,11 @@ logger = get_logger(__name__)
 
 
 class TimeoutError(Exception):
-    """代码执行超时异常"""
+    """Raised when sandboxed code execution exceeds its time limit."""
     pass
 
 
-# ── Whitelisted builtins (strict) ──────────────────────────────────────────
+# Whitelisted builtins (strict)
 # Only pure computational builtins. No I/O, no introspection, no code gen.
 _BUILTINS_WHITELIST: Set[str] = {
     # Types / constructors
@@ -74,28 +71,28 @@ _FORBIDDEN_DUNDER_SUFFIXES: Set[str] = {
 _OPERATOR_ACCESSOR_NAMES: Set[str] = {'attrgetter', 'itemgetter', 'methodcaller'}
 
 # Method names that read/write files, evaluate strings, or pivot to other
-# processes — must be rejected on ANY receiver (df.to_csv, np.array().tofile,
+# processes; reject them on ANY receiver (df.to_csv, np.array().tofile,
 # pd.read_csv, etc.) because numpy and pandas are intentionally whitelisted.
 _DANGEROUS_METHOD_NAMES: Set[str] = {
-    # pandas read_* — arbitrary file read or SSRF via URL / pickle deser RCE.
+    # pandas read_*: arbitrary file read or SSRF via URL / pickle deser RCE.
     'read_csv', 'read_table', 'read_fwf', 'read_excel', 'read_xml',
     'read_html', 'read_json', 'read_pickle', 'read_parquet', 'read_orc',
     'read_feather', 'read_hdf', 'read_sql', 'read_sql_query',
     'read_sql_table', 'read_clipboard', 'read_gbq', 'read_sas',
     'read_spss', 'read_stata',
-    # pandas to_* / ndarray.tofile — arbitrary file write / pickle write.
+    # pandas to_* / ndarray.tofile: arbitrary file write / pickle write.
     'to_csv', 'to_excel', 'to_xml', 'to_html', 'to_json', 'to_pickle',
     'to_parquet', 'to_orc', 'to_feather', 'to_hdf', 'to_sql',
     'to_clipboard', 'to_gbq', 'to_stata', 'to_latex',
     'tofile',
-    # numpy IO — arbitrary read / write / pickle deser.
+    # numpy IO: arbitrary read / write / pickle deser.
     'save', 'savez', 'savez_compressed', 'savetxt',
     'load', 'loadtxt', 'genfromtxt', 'fromfile', 'memmap',
     # String-expression evaluators that execute attacker-controlled code.
     'eval', 'query',
     # Frame / introspection accessors should never be invoked.
     'getframe', 'currentframe', 'stack', 'getouterframes',
-    # pandas.io.common — file/URL IO bypassing blocked read_* entry points.
+    # pandas.io.common: file/URL IO bypassing blocked read_* entry points.
     'urlopen', '_urlopen', 'get_filepath_or_buffer', '_get_filepath_or_buffer',
     'file_exists', 'file_open', 'open_url',
 }
@@ -183,22 +180,21 @@ def build_safe_builtins(extra_allowed: Optional[Set[str]] = None) -> Dict[str, A
     return safe
 
 
-# ── Timeout (cross-platform) ──────────────────────────────────────────────
+# Timeout (cross-platform)
 
 @contextmanager
 def timeout_context(seconds: int):
-    """
-    代码执行超时上下文管理器
+    """Bound user-code execution time.
 
-    - Unix 主线程: signal.SIGALRM
-    - Windows / 非主线程: threading.Timer + ctypes 异常注入
+    Uses SIGALRM on Unix main threads and a timer-based async exception
+    fallback elsewhere.
     """
     is_main_thread = threading.current_thread() is threading.main_thread()
 
     # Strategy 1: Unix SIGALRM (most reliable, main thread only)
     if sys.platform != 'win32' and is_main_thread:
         def timeout_handler(signum, frame):
-            raise TimeoutError(f"代码执行超时（超过{seconds}秒）")
+            raise TimeoutError(f"Code execution timed out after {seconds} seconds")
         try:
             old_handler = signal.signal(signal.SIGALRM, timeout_handler)
             signal.alarm(seconds)
@@ -240,10 +236,10 @@ def timeout_context(seconds: int):
     finally:
         timer.cancel()
         if timed_out.is_set():
-            raise TimeoutError(f"代码执行超时（超过{seconds}秒）")
+            raise TimeoutError(f"Code execution timed out after {seconds} seconds")
 
 
-# ── Core execution ─────────────────────────────────────────────────────────
+# Core execution
 
 def safe_exec_code(
     code: str,
@@ -252,15 +248,14 @@ def safe_exec_code(
     timeout: int = 30,
     max_memory_mb: Optional[int] = None
 ) -> Dict[str, Any]:
-    """
-    安全执行Python代码（当前进程内，带超时）
+    """Execute Python code in the current process with sandbox timeout guards.
 
     Args:
-        code: 要执行的Python代码
-        exec_globals: 全局变量字典
-        exec_locals: 局部变量字典（如果为None，则使用exec_globals）
-        timeout: 超时时间（秒），默认30秒
-        max_memory_mb: 最大内存限制（MB），默认500MB
+        code: Python code to execute.
+        exec_globals: globals dictionary.
+        exec_locals: locals dictionary; defaults to exec_globals.
+        timeout: timeout in seconds.
+        max_memory_mb: memory limit in MB when RLIMIT is enabled.
     """
     if exec_locals is None:
         exec_locals = exec_globals
@@ -283,14 +278,14 @@ def safe_exec_code(
         return {'success': True, 'error': None, 'result': None}
 
     except MemoryError:
-        error_msg = f"代码执行内存不足（超过{max_memory_mb}MB限制）"
+        error_msg = f"Code execution exceeded the {max_memory_mb}MB memory limit"
         logger.error(f"Code execution out of memory (limit={max_memory_mb}MB)")
         return {'success': False, 'error': error_msg, 'result': None}
     except TimeoutError as e:
         logger.error(f"Code execution timed out (timeout={timeout}s)")
         return {'success': False, 'error': str(e), 'result': None}
     except Exception as e:
-        error_msg = f"代码执行错误: {str(e)}\n{traceback.format_exc()}"
+        error_msg = f"Code execution error: {str(e)}\n{traceback.format_exc()}"
         logger.error(f"Code execution error: {e}")
         return {'success': False, 'error': error_msg, 'result': None}
 
@@ -334,7 +329,7 @@ def safe_exec_with_validation(
     )
 
 
-# ── Subprocess isolation (medium-term) ─────────────────────────────────────
+# Subprocess isolation (medium-term)
 
 def safe_exec_isolated(
     code: str,
@@ -350,7 +345,7 @@ def safe_exec_isolated(
 
     Args:
         code: Python code to execute
-        input_data: dict of variable names → values to inject (must be picklable)
+        input_data: dict of variable names to inject (must be picklable)
         timeout: max seconds
         max_memory_mb: memory limit (Linux only, via RLIMIT_AS)
 
@@ -427,28 +422,28 @@ def safe_exec_isolated(
         proc.join(timeout=5)
         return {
             'success': False,
-            'error': f"代码执行超时（超过{timeout}秒），子进程已终止",
+            'error': f"Code execution timed out after {timeout} seconds; subprocess terminated",
             'result': None,
         }
 
     if proc.exitcode != 0 and not parent_conn.poll():
         return {
             'success': False,
-            'error': f"子进程异常退出 (exit code: {proc.exitcode})",
+            'error': f"Subprocess exited abnormally (exit code: {proc.exitcode})",
             'result': None,
         }
 
     try:
         if parent_conn.poll(timeout=1):
             return parent_conn.recv()
-        return {'success': False, 'error': "子进程未返回结果", 'result': None}
+        return {'success': False, 'error': "Subprocess returned no result", 'result': None}
     except Exception as e:
-        return {'success': False, 'error': f"读取子进程结果失败: {e}", 'result': None}
+        return {'success': False, 'error': f"Failed to read subprocess result: {e}", 'result': None}
     finally:
         parent_conn.close()
 
 
-# ── Static validation ──────────────────────────────────────────────────────
+# Static validation
 
 def _fold_string_constant(node: Any) -> Optional[str]:
     """Resolve compile-time string concatenation for sandbox static checks."""
@@ -514,9 +509,7 @@ def _dangerous_pd_numpy_internal(root: Optional[str], attrs: list) -> Optional[s
 
 
 def validate_code_safety(code: str) -> Tuple[bool, Optional[str]]:
-    """
-    验证代码安全性（正则 + AST 双重检查）
-    """
+    """Validate code safety with regex and AST checks."""
     import ast
     import re
 
@@ -562,7 +555,7 @@ def validate_code_safety(code: str) -> Tuple[bool, Optional[str]]:
         r'\bbreakpoint\s*\(',
         r'\b__builtins__\s*[\[.]', r'\b__import__\s*\(',
         r'\bimportlib\b',
-        # pandas / numpy IO and eval — arbitrary file r/w, SSRF, pickle RCE,
+        # pandas / numpy IO and eval: arbitrary file r/w, SSRF, pickle RCE,
         # or string-expression evaluation. numpy and pandas are intentionally
         # whitelisted modules, so each dangerous method must be banned by name.
         r'\.(read_csv|read_table|read_fwf|read_excel|read_xml|read_html|'
@@ -581,31 +574,31 @@ def validate_code_safety(code: str) -> Tuple[bool, Optional[str]]:
         r'tb_frame|tb_next|func_globals|func_code|func_closure)\b',
         # numpy sub-packages that expose C/native escape hatches.
         r'\b(np|numpy)\.(ctypeslib|distutils|f2py)\b',
-        # pandas internal IO — bypasses blocked read_csv / read_pickle entry points.
+        # pandas internal IO: bypasses blocked read_csv / read_pickle entry points.
         r'\b(pd|pandas)\.(io|compat|_libs|_testing)\b',
         r'\b(np|numpy)\.lib\b',
         r'\.(urlopen|_urlopen|get_filepath_or_buffer|_get_filepath_or_buffer)\s*\(',
-        # sys.settrace / inspect.* could also pivot — block by name.
+        # sys.settrace / inspect.* could also pivot; block by name.
         r'\b(sys\._getframe|inspect\.(currentframe|stack|getouterframes|getframeinfo))\b',
     ]
 
     for pattern in dangerous_patterns:
         if re.search(pattern, code):
-            return False, f"检测到危险代码模式: {pattern}"
+            return False, f"Unsafe code pattern detected: {pattern}"
 
     try:
         tree = ast.parse(code)
     except SyntaxError as e:
         logger.warning(f"Code syntax validation failed: {e}")
-        return False, "代码语法错误"
+        return False, "Code syntax error"
     except Exception as e:
-        # AST parse failure → reject (fail-closed, not fail-open)
+        # AST parse failure: reject fail-closed, not fail-open.
         logger.exception("AST parse failed, rejecting code")
-        return False, "代码解析失败"
+        return False, "Code parse failed"
 
     # NOTE: these names are checked on attribute calls like `mod.func(...)`.
     # Names that doubly serve as common user variables (signal/code/io/pickle/
-    # ssl/http) are intentionally excluded here — the `import xxx` regex above
+    # ssl/http) are intentionally excluded here; the `import xxx` regex above
     # already blocks them from ever being a real module reference, so any
     # `signal.xxx(...)` call must be a user variable (e.g. MACD `signal`).
     dangerous_modules = {
@@ -635,19 +628,19 @@ def validate_code_safety(code: str) -> Tuple[bool, Optional[str]]:
     for node in ast.walk(tree):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             if _string_has_forbidden_dunder(node.value):
-                return False, "检测到危险 dunder 字符串字面量"
+                return False, "Unsafe dunder string literal detected"
 
         if isinstance(node, ast.Import):
             for alias in node.names:
                 ok, err = _is_safe_import_name(alias.name)
                 if not ok:
-                    return False, f"不允许导入模块 '{alias.name}'，仅允许: {', '.join(sorted(SAFE_IMPORT_MODULES))}"
+                    return False, f"Import not allowed: '{alias.name}'. Allowed modules: {', '.join(sorted(SAFE_IMPORT_MODULES))}"
 
         elif isinstance(node, ast.ImportFrom):
             if node.module:
                 ok, err = _is_safe_import_name(node.module)
                 if not ok:
-                    return False, f"不允许导入模块 '{node.module}'，仅允许: {', '.join(sorted(SAFE_IMPORT_MODULES))}"
+                    return False, f"Import not allowed: '{node.module}'. Allowed modules: {', '.join(sorted(SAFE_IMPORT_MODULES))}"
 
                 for alias in node.names:
                     if alias.name == '*':
@@ -658,46 +651,46 @@ def validate_code_safety(code: str) -> Tuple[bool, Optional[str]]:
 
         elif isinstance(node, ast.Call):
             if _is_operator_accessor_call(node):
-                return False, "不允许使用 operator.attrgetter/itemgetter/methodcaller"
+                return False, "operator.attrgetter/itemgetter/methodcaller are not allowed"
             if isinstance(node.func, ast.Name) and node.func.id in dangerous_call_names:
-                return False, f"检测到危险函数调用: {node.func.id}()"
+                return False, f"Unsafe function call detected: {node.func.id}()"
             if isinstance(node.func, ast.Attribute):
                 if isinstance(node.func.value, ast.Name) and node.func.value.id in dangerous_modules:
-                    return False, f"检测到危险模块调用: {node.func.value.id}.{node.func.attr}"
+                    return False, f"Unsafe module call detected: {node.func.value.id}.{node.func.attr}"
                 root, attrs = _attribute_access_chain(node.func)
                 internal = _dangerous_pd_numpy_internal(root, attrs)
                 if internal:
-                    return False, f"检测到访问 pandas/numpy 内部模块: {internal}"
+                    return False, f"Unsafe pandas/numpy internal access detected: {internal}"
                 # Block dangerous methods on any receiver. pandas/numpy are
                 # whitelisted modules, so we cannot tell statically whether
                 # `x.to_csv(...)` targets a DataFrame or some local object.
                 # Treat the *method name* itself as poisoned everywhere.
                 if isinstance(node.func.attr, str) and node.func.attr in _DANGEROUS_METHOD_NAMES:
-                    return False, f"检测到危险方法调用: .{node.func.attr}()"
+                    return False, f"Unsafe method call detected: .{node.func.attr}()"
             for arg in node.args:
                 folded = _fold_string_constant(arg)
                 if folded is not None and _string_has_forbidden_dunder(folded):
-                    return False, "检测到危险 dunder 字符串参数"
+                    return False, "Unsafe dunder string argument detected"
 
         elif isinstance(node, ast.Attribute):
             if isinstance(node.attr, str) and node.attr in dangerous_dunder_attrs:
-                return False, f"检测到访问危险属性: .{node.attr}"
+                return False, f"Unsafe attribute access detected: .{node.attr}"
             if isinstance(node.attr, str) and node.attr in _DANGEROUS_FRAME_ATTRS:
-                return False, f"检测到访问 frame/closure 属性: .{node.attr}"
+                return False, f"Unsafe frame/closure attribute access detected: .{node.attr}"
             if isinstance(node.attr, str) and node.attr in _DANGEROUS_SUBMODULE_ATTRS:
                 if isinstance(node.value, ast.Name) and node.value.id in {'np', 'numpy'}:
-                    return False, f"检测到访问危险子模块: {node.value.id}.{node.attr}"
+                    return False, f"Unsafe submodule access detected: {node.value.id}.{node.attr}"
             root, attrs = _attribute_access_chain(node)
             internal = _dangerous_pd_numpy_internal(root, attrs)
             if internal:
-                return False, f"检测到访问 pandas/numpy 内部模块: {internal}"
+                return False, f"Unsafe pandas/numpy internal access detected: {internal}"
             folded = _fold_string_constant(node)
             if folded is not None and _string_has_forbidden_dunder(folded):
-                return False, "检测到危险 dunder 属性访问"
+                return False, "Unsafe dunder attribute access detected"
 
         elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
             folded = _fold_string_constant(node)
             if folded is not None and _string_has_forbidden_dunder(folded):
-                return False, "检测到危险 dunder 字符串拼接"
+                return False, "Unsafe dunder string concatenation detected"
 
     return True, None

@@ -1,4 +1,4 @@
-from app.services.backtest_presets import (
+﻿from app.services.backtest_presets import (
     PRESET_LIVE_ALIGNED,
     PRESET_EXPLORATION,
     apply_backtest_preset,
@@ -22,4 +22,4 @@ def test_preset_fills_missing_defaults():
     })
     assert 'enableMtf' not in data
     assert data['slippage'] == 0.0
-    assert data['commission'] == 0.001
+    assert data['commission'] == 0.0005

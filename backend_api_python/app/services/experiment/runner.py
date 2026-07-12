@@ -10,7 +10,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Callable, Dict, List, Optional
 
-from app.services.backtest import BacktestService
+from app.services.unified_backtest import UnifiedBacktestService
 from app.services.experiment.evolution import StrategyEvolutionService
 from app.services.experiment.overrides import enrich_experiment_candidate, enrich_experiment_overrides
 from app.services.experiment.optimizers import make_optimizer
@@ -37,12 +37,12 @@ class ExperimentRunnerService:
     def __init__(
         self,
         *,
-        backtest_service: Optional[BacktestService] = None,
+        backtest_service: Optional[UnifiedBacktestService] = None,
         regime_service: Optional[MarketRegimeService] = None,
         scoring_service: Optional[StrategyScoringService] = None,
         evolution_service: Optional[StrategyEvolutionService] = None,
     ):
-        self.backtest_service = backtest_service or BacktestService()
+        self.backtest_service = backtest_service or UnifiedBacktestService()
         self.regime_service = regime_service or MarketRegimeService()
         self.scoring_service = scoring_service or StrategyScoringService()
         self.evolution_service = evolution_service or StrategyEvolutionService()
@@ -99,7 +99,7 @@ class ExperimentRunnerService:
         indicator_code = snapshot.get('code') or ''
         indicator_params = extract_indicator_params(indicator_code)
 
-        # OOS 70/30 split — same semantics as `run_structured_tune`. We train
+        # OOS 70/30 split uses the same semantics as `run_structured_tune`. We train
         # on the first 70% to keep LLM round backtests deterministic, then
         # validate the final ranked list on the held-out 30%. Disabled
         # automatically when the window is too short to split cleanly.
@@ -312,15 +312,11 @@ class ExperimentRunnerService:
         payload = {
             'user_id': user_id,
             'strategy_name': strategy_name,
-            'strategy_type': 'IndicatorStrategy',
+            'strategy_type': 'ScriptStrategy',
             'market_category': market_category,
             'execution_mode': 'signal',
             'status': 'stopped',
-            'indicator_config': {
-                'indicator_id': snap.get('indicator_id'),
-                'code': snap.get('code'),
-                'indicator_params': snap.get('indicator_params') or {},
-            },
+            'strategy_code': snap.get('code') or '',
             'trading_config': {
                 'symbol': snap.get('symbol'),
                 'timeframe': snap.get('timeframe'),
@@ -393,6 +389,15 @@ class ExperimentRunnerService:
             'profitFactor': result.get('profitFactor'),
             'winRate': result.get('winRate'),
             'totalTrades': result.get('totalTrades'),
+            'bestTrade': result.get('bestTrade'),
+            'worstTrade': result.get('worstTrade'),
+            'avgTrade': result.get('avgTrade'),
+            'winningTrades': result.get('winningTrades'),
+            'losingTrades': result.get('losingTrades'),
+            'avgWin': result.get('avgWin'),
+            'avgLoss': result.get('avgLoss'),
+            'finalEquity': result.get('finalEquity'),
+            'totalCommission': result.get('totalCommission'),
         }
 
     @staticmethod
@@ -555,6 +560,12 @@ class ExperimentRunnerService:
 
         t0 = time.time()
         snapshot, start_date, end_date = self._build_snapshot(base=base, user_id=user_id)
+        parameter_space = self._normalize_parameter_space_for_execution(
+            parameter_space,
+            snapshot=snapshot,
+            start_date=start_date,
+            end_date=end_date,
+        )
         regime = self.detect_regime(base)
 
         # OOS validation 70/30: train on the first 70% of the window, then
@@ -626,8 +637,26 @@ class ExperimentRunnerService:
                 detail = failures[0] if failures else 'No valid candidates were generated'
                 raise ValueError(f'All tuning candidates failed backtest. {detail}')
 
+        oos_fallback_reason = None
+        if oos_start is not None and oos_end is not None and self._all_candidates_no_trade(ranked):
+            oos_fallback_reason = (
+                'The in-sample split produced no trades for every candidate; '
+                'ranking fell back to the full requested window.'
+            )
+            logger.info("structured_tune OOS fallback: %s", oos_fallback_reason)
+            ranked = self._reevaluate_ranked_on_window(
+                ranked,
+                start_date=start_date,
+                end_date=end_date,
+                regime=regime,
+                scorer=scorer,
+            )
+            train_start, train_end = start_date, end_date
+            oos_start = oos_end = None
+
         evaluation_trace = self._build_evaluation_trace(ranked)
         ranked = scorer.rank_results(ranked)
+        no_trade = self._all_candidates_no_trade(ranked)
         if oos_start is not None and oos_end is not None:
             self._evaluate_oos(ranked, oos_start=oos_start, oos_end=oos_end, regime=regime, scorer=scorer)
         best = ranked[0] if ranked else None
@@ -646,6 +675,13 @@ class ExperimentRunnerService:
                 'oosStart': oos_start.strftime('%Y-%m-%d'),
                 'oosEnd': oos_end.strftime('%Y-%m-%d'),
                 'trainRatio': 0.7,
+            }
+        elif oos_fallback_reason:
+            oos_meta = {
+                'enabled': False,
+                'fallbackReason': oos_fallback_reason,
+                'trainStart': train_start.strftime('%Y-%m-%d'),
+                'trainEnd': train_end.strftime('%Y-%m-%d'),
             }
 
         return {
@@ -678,6 +714,11 @@ class ExperimentRunnerService:
                 'method': method,
                 'maxVariants': max_variants,
                 'parameterCount': len(parameter_space or {}),
+                'noTrade': no_trade,
+                'warning': (
+                    'No candidate generated trades in this window. Extend the date range, '
+                    'reduce lookback thresholds, or loosen filters.'
+                ) if no_trade else None,
             },
         }
 
@@ -715,7 +756,7 @@ class ExperimentRunnerService:
                 method, parameter_space, max_evals=max(8, int(max_evals)),
             )
         except ValueError as exc:
-            logger.warning("Failed to build %s optimizer: %s — falling back to grid", method, exc)
+            logger.warning("Failed to build %s optimizer: %s; falling back to grid", method, exc)
             optimizer = None
 
         if optimizer is None:
@@ -829,18 +870,274 @@ class ExperimentRunnerService:
         return ranked
 
     @staticmethod
+    def _candidate_trade_count(candidate: Dict[str, Any]) -> int:
+        result = candidate.get('result') or {}
+        try:
+            return int(float(result.get('totalTrades') or 0))
+        except Exception:
+            return 0
+
+    @classmethod
+    def _all_candidates_no_trade(cls, ranked: List[Dict[str, Any]]) -> bool:
+        return bool(ranked) and all(cls._candidate_trade_count(item) <= 0 for item in ranked)
+
+    def _reevaluate_ranked_on_window(
+        self,
+        ranked: List[Dict[str, Any]],
+        *,
+        start_date: datetime,
+        end_date: datetime,
+        regime: Dict[str, Any],
+        scorer: StrategyScoringService,
+    ) -> List[Dict[str, Any]]:
+        refreshed: List[Dict[str, Any]] = []
+        failures: List[str] = []
+        for candidate in ranked:
+            try:
+                result = self._run_backtest_checked(
+                    candidate.get('snapshot') or {},
+                    start_date=start_date,
+                    end_date=end_date,
+                    candidate_name=str(candidate.get('name') or ''),
+                )
+            except Exception as exc:
+                logger.warning("fallback full-window backtest failed for %s: %s", candidate.get('name'), exc)
+                failures.append(str(exc))
+                continue
+            updated = dict(candidate)
+            updated['result'] = self._slim_result(result)
+            updated['score'] = scorer.score_result(result, regime=regime)
+            refreshed.append(enrich_experiment_candidate(updated))
+        if refreshed:
+            return refreshed
+        if failures:
+            logger.warning("All fallback full-window tuning candidates failed: %s", failures[0])
+        return ranked
+
+    @staticmethod
     def _apply_overrides_to_snapshot(
         base_snapshot: Dict[str, Any],
         overrides: Dict[str, Any],
     ) -> Dict[str, Any]:
-        """Materialise an override dict (dot-paths → values) into a snapshot."""
+        """Materialise an override dict (dot-paths -> values) into a snapshot."""
         from app.services.experiment.evolution import StrategyEvolutionService
         evo = StrategyEvolutionService()
         snap = copy.deepcopy(base_snapshot)
         for key, value in (overrides or {}).items():
             parts = evo._normalize_key(key).split('.')
             evo._set_nested(snap, parts, value)
-        return snap
+        return ExperimentRunnerService._sync_snapshot_param_aliases(snap, overrides)
+
+    @staticmethod
+    def _param_name_from_path(path: str) -> Optional[str]:
+        """Return the leaf name for supported tunable-parameter override paths."""
+        normalized = str(path or '').strip().replace('strategyConfig.', 'strategy_config.')
+        prefixes = (
+            'indicator_params.',
+            'indicatorParams.',
+            'script_params.',
+            'scriptParams.',
+            'params.',
+            'paramOverrides.',
+            'strategy_config.indicator_params.',
+            'strategy_config.indicatorParams.',
+            'strategy_config.script_params.',
+            'strategy_config.scriptParams.',
+            'strategy_config.params.',
+            'strategy_config.paramOverrides.',
+        )
+        for prefix in prefixes:
+            if normalized.startswith(prefix):
+                name = normalized[len(prefix):].split('.')[-1].strip()
+                return name or None
+        return None
+
+    @staticmethod
+    def _is_period_like_param(name: str) -> bool:
+        key = str(name or '').strip().lower()
+        return any(token in key for token in (
+            'period', 'lookback', 'window', 'length', 'len', 'bars',
+            'ema', 'sma', 'rsi', 'adx', 'atr', 'ma',
+        ))
+
+    @staticmethod
+    def _normalize_param_value_for_execution(name: str, value: Any) -> Any:
+        """Return parameter values exactly as supplied by ScriptStrategy code/UI."""
+        return value
+
+    @staticmethod
+    def _resolve_space_values(spec: Any) -> List[Any]:
+        if isinstance(spec, list):
+            return list(spec)
+        if isinstance(spec, tuple):
+            return list(spec)
+        if isinstance(spec, dict):
+            minimum = spec.get('min')
+            maximum = spec.get('max')
+            step = spec.get('step', 1)
+            if minimum is None or maximum is None:
+                return []
+            if step == 0:
+                return [minimum]
+            try:
+                cursor = float(minimum)
+                max_value = float(maximum)
+                step_value = float(step)
+            except (TypeError, ValueError):
+                return []
+            if step_value <= 0:
+                return []
+            values: List[Any] = []
+            while cursor <= max_value + 1e-12 and len(values) < 200:
+                values.append(round(cursor, 10))
+                cursor += step_value
+            return values
+        return [spec]
+
+    @staticmethod
+    def _expand_period_values(name: str, values: List[Any]) -> List[Any]:
+        nums: List[int] = []
+        lower = str(name or '').lower()
+        allow_zero = any(token in lower for token in ('cooldown', 'delay', 'wait', 'pause'))
+        for value in values:
+            try:
+                n = int(round(float(value)))
+            except (TypeError, ValueError):
+                continue
+            nums.append(max(0 if allow_zero else 1, n))
+        if not nums:
+            return values
+
+        positive = [n for n in nums if n > 0]
+        current_max = max(positive or [max(nums)])
+        anchors = [0, 2, 4, 6, 8, 12] if allow_zero else [3, 5, 8, 13, 21]
+        if not allow_zero and current_max >= 34:
+            anchors.extend([34, 55])
+        if not allow_zero and current_max >= 89:
+            anchors.append(89)
+        if not allow_zero and current_max >= 144:
+            anchors.append(144)
+        cap = max(current_max, max(anchors))
+        return [n for n in nums + anchors if n <= cap]
+
+    @staticmethod
+    def _dedupe_numeric_values(values: List[Any]) -> List[Any]:
+        out: List[Any] = []
+        seen = set()
+        for value in values:
+            try:
+                num = float(value)
+                normalized: Any = int(round(num)) if abs(num - round(num)) < 1e-9 else round(num, 10)
+            except (TypeError, ValueError):
+                normalized = value
+            key = json.dumps(normalized, sort_keys=True, ensure_ascii=False) if isinstance(normalized, (dict, list)) else str(normalized)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(normalized)
+        out.sort(key=lambda item: float(item) if isinstance(item, (int, float)) else 0.0)
+        return out
+
+    @staticmethod
+    def _normalize_parameter_space_for_execution(
+        parameter_space: Dict[str, Any],
+        *,
+        snapshot: Optional[Dict[str, Any]] = None,
+        start_date: Optional[datetime] = None,
+        end_date: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        if not isinstance(parameter_space, dict):
+            return {}
+        normalized: Dict[str, Any] = {}
+        for raw_path, spec in parameter_space.items():
+            path = str(raw_path or '').strip()
+            if not path:
+                continue
+            name = ExperimentRunnerService._param_name_from_path(path) or path.split('.')[-1]
+            values = ExperimentRunnerService._resolve_space_values(spec)
+            if not values:
+                continue
+            values = [
+                ExperimentRunnerService._normalize_param_value_for_execution(name, value)
+                for value in values
+            ]
+            if ExperimentRunnerService._is_period_like_param(name):
+                values = ExperimentRunnerService._expand_period_values(name, values)
+            normalized[path] = ExperimentRunnerService._dedupe_numeric_values(values)[:8]
+        return normalized
+
+    @staticmethod
+    def _sync_snapshot_param_aliases(
+        snapshot: Dict[str, Any],
+        overrides: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Keep all strategy parameter aliases aligned before ScriptStrategy backtesting.
+
+        Historical call-sites used several equivalent containers: top-level
+        ``indicator_params``/``script_params`` plus strategy_config
+        ``params``/``paramOverrides``. Candidate tuning must update all aliases
+        together; otherwise a changed value in ``script_params`` can be
+        overwritten by the old value from ``params`` during execution.
+        """
+        if not isinstance(snapshot, dict):
+            return snapshot
+
+        strategy_config = snapshot.setdefault('strategy_config', {})
+        if not isinstance(strategy_config, dict):
+            strategy_config = {}
+            snapshot['strategy_config'] = strategy_config
+
+        merged: Dict[str, Any] = {}
+        for source in (
+            snapshot.get('indicator_params'),
+            snapshot.get('indicatorParams'),
+            snapshot.get('script_params'),
+            snapshot.get('scriptParams'),
+            snapshot.get('params'),
+            snapshot.get('paramOverrides'),
+            strategy_config.get('indicator_params'),
+            strategy_config.get('indicatorParams'),
+            strategy_config.get('script_params'),
+            strategy_config.get('scriptParams'),
+            strategy_config.get('params'),
+            strategy_config.get('paramOverrides'),
+        ):
+            if isinstance(source, dict):
+                merged.update(source)
+
+        for path, value in (overrides or {}).items():
+            name = ExperimentRunnerService._param_name_from_path(str(path))
+            if name:
+                merged[name] = ExperimentRunnerService._normalize_param_value_for_execution(name, value)
+
+        if not merged:
+            return snapshot
+
+        merged = {
+            str(name): ExperimentRunnerService._normalize_param_value_for_execution(str(name), value)
+            for name, value in dict(merged).items()
+        }
+        snapshot['indicator_params'] = merged
+        snapshot['indicatorParams'] = merged
+        snapshot['script_params'] = merged
+        snapshot['scriptParams'] = merged
+        snapshot['params'] = merged
+        snapshot['paramOverrides'] = merged
+        strategy_config['indicator_params'] = merged
+        strategy_config['indicatorParams'] = merged
+        strategy_config['script_params'] = merged
+        strategy_config['scriptParams'] = merged
+        strategy_config['params'] = merged
+        strategy_config['paramOverrides'] = merged
+
+        config_snapshot = snapshot.get('config_snapshot')
+        if isinstance(config_snapshot, dict):
+            signal_config = config_snapshot.setdefault('signalConfig', {})
+            if isinstance(signal_config, dict):
+                signal_config['indicatorParams'] = merged
+                signal_config['scriptParams'] = merged
+                signal_config['params'] = merged
+        return snapshot
 
     def _build_candidates(
         self,
@@ -850,9 +1147,10 @@ class ExperimentRunnerService:
         parameter_space: Dict[str, Any],
         evolution: Dict[str, Any],
     ) -> List[Dict[str, Any]]:
+        base_snapshot = self._sync_snapshot_param_aliases(copy.deepcopy(base_snapshot))
         candidates = [{
             'name': 'baseline',
-            'snapshot': copy.deepcopy(base_snapshot),
+            'snapshot': self._sync_snapshot_param_aliases(copy.deepcopy(base_snapshot)),
             'overrides': {},
             'source': 'baseline',
         }]
@@ -866,6 +1164,7 @@ class ExperimentRunnerService:
                     self.evolution_service._normalize_key(key).split('.'),
                     value,
                 )
+            snapshot = self._sync_snapshot_param_aliases(snapshot, overrides)
             candidates.append({
                 'name': str(variant.get('name') or f'candidate_{idx}'),
                 'snapshot': snapshot,
@@ -883,6 +1182,11 @@ class ExperimentRunnerService:
                 max_variants=max_variants or 12,
                 method=str(evo_conf.get('method') or 'grid'),
             )
+            for candidate in generated:
+                candidate['snapshot'] = self._sync_snapshot_param_aliases(
+                    candidate.get('snapshot') or {},
+                    candidate.get('overrides') or {},
+                )
             candidates.extend(generated)
 
         unique: List[Dict[str, Any]] = []
@@ -899,25 +1203,215 @@ class ExperimentRunnerService:
         start_date, end_date = self._parse_dates(base)
         snapshot = copy.deepcopy(base.get('snapshot') or {})
         if not snapshot:
-            snapshot = {
-                'code': base.get('indicatorCode') or base.get('code') or '',
-                'market': base.get('market') or 'Crypto',
-                'symbol': base.get('symbol') or '',
-                'timeframe': base.get('timeframe') or '1D',
-                'initial_capital': float(base.get('initialCapital') or 10000),
-                'commission': float(base.get('commission') or 0),
-                'slippage': float(base.get('slippage') or 0),
-                'leverage': int(base.get('leverage') or 1),
-                'trade_direction': str(base.get('tradeDirection') or 'long'),
-                'strategy_config': base.get('strategyConfig') or {},
-                'indicator_params': base.get('indicatorParams') or {},
-                'indicator_id': base.get('indicatorId'),
-                'user_id': user_id,
-                'strict_mode': bool(base.get('strictMode', base.get('strict_mode', True))),
-                'run_type': str(base.get('runType') or 'indicator'),
-            }
+            snapshot = self._resolve_base_snapshot(base=base, user_id=user_id)
         snapshot['user_id'] = user_id
+        strategy_config = snapshot.setdefault('strategy_config', {})
+        if snapshot.get('indicator_params'):
+            strategy_config.setdefault('indicator_params', snapshot.get('indicator_params') or {})
+        if snapshot.get('script_params'):
+            strategy_config.setdefault('script_params', snapshot.get('script_params') or {})
+            strategy_config.setdefault('params', snapshot.get('script_params') or {})
+        snapshot = self._sync_snapshot_param_aliases(snapshot)
         return snapshot, start_date, end_date
+
+    @staticmethod
+    def _dict_value(value: Any) -> Dict[str, Any]:
+        if isinstance(value, dict):
+            return dict(value)
+        if isinstance(value, str) and value.strip():
+            try:
+                parsed = json.loads(value)
+                if isinstance(parsed, dict):
+                    return parsed
+            except Exception:
+                pass
+        return {}
+
+    @staticmethod
+    def _int_or_none(value: Any) -> Optional[int]:
+        try:
+            if value is None or str(value).strip() == "":
+                return None
+            return int(value)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _asset_identity(base: Dict[str, Any]) -> tuple[str, Optional[int]]:
+        asset_type = str(
+            base.get('assetType')
+            or base.get('asset_type')
+            or base.get('type')
+            or ''
+        ).strip().lower()
+        if asset_type in ('indicator_code',):
+            asset_type = 'indicator'
+        elif asset_type in ('script_source', 'script-strategy'):
+            asset_type = 'script'
+        elif asset_type in ('template', 'preset'):
+            asset_type = 'bot'
+        asset_id = ExperimentRunnerService._int_or_none(
+            base.get('assetId')
+            or base.get('asset_id')
+            or base.get('sourceId')
+            or base.get('source_id')
+            or base.get('indicatorId')
+            or base.get('scriptSourceId')
+            or base.get('strategyId')
+        )
+        return asset_type, asset_id
+
+    def _collect_param_overrides(self, base: Dict[str, Any]) -> Dict[str, Any]:
+        strategy_config = self._dict_value(base.get('strategyConfig') or base.get('strategy_config'))
+        override_config = self._dict_value(base.get('overrideConfig') or base.get('override_config'))
+        merged: Dict[str, Any] = {}
+        for source in (
+            self._dict_value(base.get('indicatorParams')),
+            self._dict_value(base.get('scriptParams')),
+            self._dict_value(base.get('params')),
+            self._dict_value(base.get('paramOverrides') or base.get('param_overrides')),
+            self._dict_value(strategy_config.get('indicator_params') or strategy_config.get('indicatorParams')),
+            self._dict_value(strategy_config.get('script_params') or strategy_config.get('scriptParams')),
+            self._dict_value(strategy_config.get('params') or strategy_config.get('paramOverrides')),
+            self._dict_value(override_config.get('indicator_params') or override_config.get('indicatorParams')),
+            self._dict_value(override_config.get('script_params') or override_config.get('scriptParams')),
+            self._dict_value(override_config.get('params') or override_config.get('paramOverrides')),
+        ):
+            merged.update(source)
+        return merged
+
+    def _runtime_override(self, base: Dict[str, Any], params: Dict[str, Any]) -> Dict[str, Any]:
+        strategy_config = self._dict_value(base.get('strategyConfig') or base.get('strategy_config'))
+        override = self._dict_value(base.get('overrideConfig') or base.get('override_config'))
+        for source_key, target_key in (
+            ('market', 'market'),
+            ('symbol', 'symbol'),
+            ('timeframe', 'timeframe'),
+            ('marketType', 'market_type'),
+            ('market_type', 'market_type'),
+            ('exchangeId', 'exchange_id'),
+            ('exchange_id', 'exchange_id'),
+            ('initialCapital', 'initialCapital'),
+            ('initial_capital', 'initialCapital'),
+            ('investmentAmount', 'investment_amount'),
+            ('investment_amount', 'investment_amount'),
+            ('leverage', 'leverage'),
+            ('tradeDirection', 'trade_direction'),
+            ('trade_direction', 'trade_direction'),
+            ('commission', 'commission'),
+            ('slippage', 'slippage'),
+            ('fundingRateAnnual', 'fundingRateAnnual'),
+            ('fundingIntervalHours', 'fundingIntervalHours'),
+            ('strictMode', 'strictMode'),
+            ('strict_mode', 'strict_mode'),
+        ):
+            if source_key in base:
+                override[target_key] = base.get(source_key)
+        for key in ('fees', 'risk', 'position', 'scale', 'execution'):
+            if isinstance(strategy_config.get(key), dict):
+                current = self._dict_value(override.get(key))
+                current.update(strategy_config.get(key) or {})
+                override[key] = current
+        if params:
+            override['indicator_params'] = dict(params)
+            override['script_params'] = dict(params)
+            override['params'] = dict(params)
+            override['paramOverrides'] = dict(params)
+        market_type = str(override.get('market_type') or '').strip().lower()
+        if market_type in ('futures', 'future', 'perp', 'perpetual'):
+            market_type = 'swap'
+            override['market_type'] = market_type
+        if market_type == 'spot':
+            override['leverage'] = 1
+            override['trade_direction'] = 'long'
+        return override
+
+    def _resolve_base_snapshot(self, *, base: Dict[str, Any], user_id: int) -> Dict[str, Any]:
+        """Build the same strategy snapshot shape used by the public backtest center.
+
+        Experiment tuning must not invent a separate execution model. It tunes
+        by producing candidate overrides, then every candidate goes through the
+        single V2 backtest engine via StrategySnapshotResolver.
+        """
+        from app.services.strategy_snapshot import StrategySnapshotResolver
+
+        asset_type, asset_id = self._asset_identity(base)
+        params = self._collect_param_overrides(base)
+        override = self._runtime_override(base, params)
+        market = str(override.get('market') or base.get('market') or 'Crypto').strip() or 'Crypto'
+
+        script_source_id = self._int_or_none(base.get('scriptSourceId') or base.get('sourceId'))
+        indicator_id = self._int_or_none(base.get('indicatorId'))
+        strategy_id = self._int_or_none(base.get('strategyId'))
+        if asset_type == 'script':
+            script_source_id = script_source_id or asset_id
+        elif asset_type == 'indicator':
+            indicator_id = indicator_id or asset_id
+        elif asset_type == 'bot':
+            strategy_id = strategy_id or asset_id
+
+        if script_source_id:
+            from app.services.script_source import get_script_source_service
+
+            source = get_script_source_service().get_source(script_source_id, user_id=user_id)
+            if not source:
+                raise ValueError("Script source not found")
+            strategy = {
+                'id': None,
+                'strategy_name': override.get('strategy_name') or source.get('name') or f'Script Source #{script_source_id}',
+                'strategy_type': 'ScriptStrategy',
+                'strategy_mode': 'script',
+                'strategy_code': '',
+                'market_category': market,
+                'status': 'draft',
+                'trading_config': {
+                    **override,
+                    'market_category': market,
+                    'script_source_id': script_source_id,
+                },
+            }
+        elif strategy_id:
+            from app.routes.strategy_services import get_strategy_service
+
+            strategy = get_strategy_service().get_strategy(strategy_id, user_id=user_id)
+            if not strategy:
+                raise ValueError("Strategy not found")
+        elif str(base.get('indicatorCode') or '').strip():
+            indicator_code = str(base.get('indicatorCode') or '').strip()
+            strategy = {
+                'id': None,
+                'strategy_name': override.get('strategy_name') or base.get('name') or 'Inline Experiment Script',
+                'strategy_type': 'ScriptStrategy',
+                'strategy_mode': 'script',
+                'strategy_code': indicator_code,
+                'market_category': market,
+                'status': 'draft',
+                'trading_config': {
+                    **override,
+                    'market_category': market,
+                },
+            }
+        else:
+            raise ValueError(
+                "Indicators are chart-only. Convert the indicator to a script strategy before running experiments."
+            )
+
+        snapshot = StrategySnapshotResolver(user_id=user_id).resolve(strategy, override)
+        snapshot['user_id'] = user_id
+        strategy_config = snapshot.setdefault('strategy_config', {})
+        if params:
+            snapshot['indicator_params'] = dict(params)
+            snapshot['script_params'] = dict(params)
+            strategy_config['indicator_params'] = dict(params)
+            strategy_config['script_params'] = dict(params)
+            strategy_config['params'] = dict(params)
+            strategy_config['paramOverrides'] = dict(params)
+        if snapshot.get('market_type'):
+            strategy_config['market_type'] = snapshot.get('market_type')
+        if str(snapshot.get('market_type') or '').strip().lower() == 'spot':
+            snapshot['leverage'] = 1
+            snapshot['trade_direction'] = 'long'
+        return snapshot
 
     @staticmethod
     def _parse_dates(base: Dict[str, Any]) -> tuple[datetime, datetime]:
@@ -944,7 +1438,7 @@ class ExperimentRunnerService:
     ) -> Optional[Dict[str, datetime]]:
         """Split the backtest window into in-sample (train) + out-of-sample (test).
 
-        Returns ``None`` when the window is too short to split meaningfully —
+        Returns ``None`` when the window is too short to split meaningfully;
         callers should then fall back to the full window. We require at least
         ``min_total_days`` of data and ``min_oos_days`` of OOS to avoid trying
         to validate on a noisy 2-day tail.
@@ -1315,13 +1809,25 @@ class ExperimentRunnerService:
         if not best:
             return None
         result = best.get('result') or {}
+        oos_result = best.get('oosResult') or {}
         oos_summary = best.get('oosSummary')
+        if oos_summary is None and oos_result:
+            oos_summary = ExperimentRunnerService._result_summary(oos_result)
+        overrides = enrich_experiment_overrides(best.get('overrides') or {})
+        params = dict(overrides.get('params') or {})
+        script_params = dict(overrides.get('scriptParams') or params)
+        indicator_params = dict(overrides.get('indicatorParams') or params)
         return {
             'name': best.get('name'),
             'score': best.get('score'),
             'source': best.get('source'),
-            'overrides': enrich_experiment_overrides(best.get('overrides') or {}),
+            'overrides': overrides,
+            'params': params,
+            'paramOverrides': params,
+            'scriptParams': script_params,
+            'indicatorParams': indicator_params,
             'snapshot': best.get('snapshot'),
+            'result': result,
             'summary': ExperimentRunnerService._result_summary(result),
             'oosSummary': oos_summary,
             'oosScore': best.get('oosScore'),

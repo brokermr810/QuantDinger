@@ -16,7 +16,15 @@ logger = get_logger(__name__)
 
 # Used for idempotency on registration. Keep in sync with _builtin_specs()[0]["name"].
 _BUILTIN_PACK_ANCHOR_NAME = "[Sample] SuperTrend Trend-Following"
-_FOUR_WAY_COLUMNS = ("open_long", "close_long", "open_short", "close_short")
+_LEGACY_EXECUTION_TOKENS = (
+    "open_long",
+    "close_long",
+    "open_short",
+    "close_short",
+    "# @strategy",
+    "exit_owner",
+    "signal_form",
+)
 _LEGACY_BUILTIN_SAMPLE_NAMES = (
     _BUILTIN_PACK_ANCHOR_NAME,
     "[示例] 布林带触及",
@@ -30,19 +38,16 @@ _LEGACY_BUILTIN_SAMPLE_NAMES = (
 # QuantDinger Indicator IDE contract (the sandbox injects df / pd / np / params):
 #   * top of file declares my_indicator_name / my_indicator_description
 #   * df = df.copy()  -> work on a private copy
-#   * execution: four-way open_long/close_long/open_short/close_short
 #   * output['signals'] is chart-only and never drives orders by itself
 #   * output dict contains plots / signals; every data list MUST have length == len(df)
-#   * # @strategy ...  default risk controls; can be overridden in the backtest panel
 #   * # @param ... range=a:b:s  auto-detected by the structured parameter tuner
 _SUPERTREND_CODE = r'''# ============================================================
 # [Sample] SuperTrend Trend-Following -- classic ATR channel flip
-# --- QuantDinger execution contract (v1) ---
-# signal_form: four_way    exit_owner: engine    flip_mode: R2
+# --- QuantDinger chart indicator contract ---
 # ------------------------------------------------------------
 # Idea: build an adaptive band pair (HL2 +/- mult * ATR). The bands
-# can only tighten in the prevailing trend direction; price crossing
-# the opposite band flips the direction and fires a buy / sell signal.
+# can only tighten in the prevailing trend direction. Price crossing
+# the opposite band flips visual direction and fires chart markers.
 #
 # Design notes:
 #   1) ATR uses Wilder smoothing (ewm alpha=1/N) so values match
@@ -58,21 +63,12 @@ _SUPERTREND_CODE = r'''# =======================================================
 
 my_indicator_name = "[Sample] SuperTrend Trend-Following"
 my_indicator_description = (
-    "Classic SuperTrend: ATR-channel direction flip. Open on trend flip, "
-    "close on reverse flip. Tweak leverage / SL / TP / symbol / timeframe "
-    "in the backtest panel, or sweep params in the Smart Tuner."
+    "Classic SuperTrend: ATR-channel direction flip with chart-only bullish "
+    "and bearish markers. Convert it to a ScriptStrategy before backtesting "
+    "or live trading."
 )
 
-# ===== Default risk controls (overridable in the backtest panel) =====
 # Unit: 0–1 ratio (0.04 = 4% underlying price move; 0.001 = 0.1%; entryPct 1 = 100% capital)
-# close_* below are structural reverse exits on SuperTrend flips. If you add touch-based
-# TP/SL exits to close_*, switch the header to `exit_owner: indicator`.
-# @strategy stopLossPct 0.04
-# @strategy takeProfitPct 0.10
-# @strategy entryPct 1
-# @strategy trailingEnabled false
-# @strategy tradeDirection both
-
 # ===== Tunable params (auto-detected by the structured tuner via range=...) =====
 # @param atr_period int 10 ATR Wilder smoothing period range=7:21:1
 # @param multiplier float 3.0 ATR band multiplier range=1.5:5.0:0.5
@@ -150,15 +146,10 @@ for i in range(n):
 
     supertrend[i] = final_lower[i] if direction[i] == 1 else final_upper[i]
 
-# --- 5) Four-way edge-triggered signals on trend flip (R2: close + open same bar)
+# --- 5) Edge-triggered chart markers on trend flip
 prev_direction = np.concatenate([[0], direction[:-1]])
 flip_long = (direction == 1) & (prev_direction == -1)
 flip_short = (direction == -1) & (prev_direction == 1)
-
-df['open_long'] = pd.Series(flip_long, index=df.index).astype(bool)
-df['open_short'] = pd.Series(flip_short, index=df.index).astype(bool)
-df['close_long'] = pd.Series(flip_short, index=df.index).astype(bool)
-df['close_short'] = pd.Series(flip_long, index=df.index).astype(bool)
 
 # --- 6) Two-colour SuperTrend line: green while long, red while short
 supertrend_up = [float(v) if (d == 1 and not np.isnan(v)) else None
@@ -166,9 +157,9 @@ supertrend_up = [float(v) if (d == 1 and not np.isnan(v)) else None
 supertrend_dn = [float(v) if (d == -1 and not np.isnan(v)) else None
                  for v, d in zip(supertrend, direction)]
 
-open_long_marks = [df['low'].iloc[i] * 0.995 if bool(df['open_long'].iloc[i]) else None
+open_long_marks = [df['low'].iloc[i] * 0.995 if bool(flip_long[i]) else None
                    for i in range(n)]
-open_short_marks = [df['high'].iloc[i] * 1.005 if bool(df['open_short'].iloc[i]) else None
+open_short_marks = [df['high'].iloc[i] * 1.005 if bool(flip_short[i]) else None
                     for i in range(n)]
 
 output = {
@@ -265,22 +256,18 @@ def seed_builtin_indicators_for_new_user(db: Any, user_id: int) -> int:
             pass
 
 
-def _code_has_four_way_columns(code: str) -> bool:
+def _code_contains_legacy_execution_contract(code: str) -> bool:
     raw = code or ""
-    return all(
-        f"df['{col}']" in raw or f'df["{col}"]' in raw
-        for col in _FOUR_WAY_COLUMNS
-    )
+    return any(token in raw for token in _LEGACY_EXECUTION_TOKENS)
 
 
 def upgrade_builtin_indicator_samples() -> int:
     """
-    Upgrade persisted official samples to the current four-way execution contract.
+    Upgrade persisted official samples to the current chart-indicator contract.
 
-    Older built-in samples could draw chart markers with output['signals'] but did
-    not define executable df columns, so backtest/live correctly rejected them.
-    This intentionally updates only known official sample names, and only when
-    their code is still missing open_long/close_long/open_short/close_short.
+    Older built-in samples contained execution-contract annotations and signal
+    column names. This intentionally updates only known official sample names
+    when those legacy tokens are still present.
     """
     from app.utils.db import get_db_connection
 
@@ -310,7 +297,7 @@ def upgrade_builtin_indicator_samples() -> int:
             for row in rows:
                 row_id = row.get("id") if isinstance(row, dict) else row[0]
                 code = row.get("code") if isinstance(row, dict) else row[2]
-                if _code_has_four_way_columns(code or ""):
+                if not _code_contains_legacy_execution_contract(code or ""):
                     continue
                 cur.execute(
                     """
@@ -330,7 +317,7 @@ def upgrade_builtin_indicator_samples() -> int:
                 updated += int(cur.rowcount or 0)
             db.commit()
             if updated:
-                logger.info("Upgraded %s builtin indicator sample(s) to four-way contract", updated)
+                logger.info("Upgraded %s builtin indicator sample(s) to chart-only contract", updated)
             return updated
         except Exception as e:
             try:

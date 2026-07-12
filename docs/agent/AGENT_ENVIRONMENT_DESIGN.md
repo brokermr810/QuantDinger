@@ -73,7 +73,7 @@ Without locking into a single vendor, make this repository **stable and predicta
 Suggested structure (may be split across files; one index is mandatory):
 
 - Top-level directory roles (`backend_api_python/`, `frontend/`, `docs/`, `scripts/`).
-- Strategy and indicator entry points (link to existing guides such as `docs/STRATEGY_DEV_GUIDE.md` — avoid duplicating long excerpts).
+- Indicator and strategy entry points (link to `docs/INDICATOR_DEV_GUIDE.md` and `docs/STRATEGY_DEV_GUIDE.md` — avoid duplicating long excerpts).
 - **Red lines** — Never commit `.env`; never put secrets in docs or examples; money/live changes require human review.
 - **Happy path** — e.g. “Python-only strategy change → how to bring up Docker → how to run backend tests” in 3–5 steps.
 
@@ -148,7 +148,7 @@ Keep implementation aligned with the current tree (update this section if layout
 | Backend API | `backend_api_python/` | Routes, services, `env.example` |
 | Frontend | `frontend/` (includes prebuilt `dist`) | Matches README “Node optional” story |
 | Ops / one-command stack | `docker-compose.yml`, `scripts/` | Layer 2 commands should mirror this |
-| Strategy guides | `docs/STRATEGY_DEV_GUIDE.md`, localized variants | Layer 1 links; do not duplicate long guides |
+| Indicator / strategy guides | `docs/INDICATOR_DEV_GUIDE.md`, `docs/STRATEGY_DEV_GUIDE.md`, localized variants | Layer 1 links; do not duplicate long guides |
 
 ---
 

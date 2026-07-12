@@ -30,12 +30,6 @@ CRYPTO_VENUE_CAPABILITIES: Dict[str, VenueCapability] = {
     "okx": VenueCapability("okx", frozenset({"spot", "swap"})),
     "bitget": VenueCapability("bitget", frozenset({"spot", "swap"})),
     "bybit": VenueCapability("bybit", frozenset({"spot", "swap"})),
-    "coinbaseexchange": VenueCapability(
-        "coinbaseexchange",
-        frozenset({"spot"}),
-        aliases=frozenset({"coinbase_exchange"}),
-    ),
-    "kraken": VenueCapability("kraken", frozenset({"spot", "swap"})),
     "gate": VenueCapability("gate", frozenset({"spot", "swap"})),
     "htx": VenueCapability("htx", frozenset({"spot", "swap"})),
 }

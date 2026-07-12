@@ -1,4 +1,4 @@
-# Agent Quickstart — using QuantDinger from an AI agent
+# Agent Quickstart 閳?using QuantDinger from an AI agent
 
 This quickstart shows how to drive the QuantDinger Agent Gateway
 (`/api/agent/v1`) from any AI / automation client. It assumes you already
@@ -11,7 +11,7 @@ For the machine-readable contract, see [agent-openapi.json](agent-openapi.json).
 
 ## 1. Issue an agent token (one-time)
 
-Tokens are minted by a logged-in human user (Profile → **My Agent Token**) or
+Tokens are minted by a logged-in human user (Profile 閳?**My Agent Token**) or
 by an admin via `/api/agent/v1/admin/tokens`. Agents never mint tokens for
 themselves. Get a normal JWT first (login UI or `/api/auth/login`), then:
 
@@ -64,7 +64,7 @@ Response (the full token is shown **once**):
 ```
 
 Store the `token` value somewhere safe (password manager, secrets store).
-The server only keeps a hash — there is no way to recover it later.
+The server only keeps a hash 閳?there is no way to recover it later.
 
 ### Scope cheat sheet
 
@@ -111,12 +111,12 @@ curl -s "http://localhost:8888/api/agent/v1/klines?market=Crypto&symbol=BTC/USDT
 ## 4. Run a backtest (class B, async)
 
 ```bash
-curl -s -X POST http://localhost:8888/api/agent/v1/backtests \
+curl -s -X POST http://localhost:8888/api/agent/v1/backtest/run \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: ma-cross-2024-q1-001" \
   -d '{
-        "code": "fast = SMA(close, 10)\nslow = SMA(close, 30)\ndf[\"buy\"]  = CROSSOVER(fast, slow).fillna(False).astype(bool)\ndf[\"sell\"] = CROSSUNDER(fast, slow).fillna(False).astype(bool)",
+        "code": "fast = SMA(close, 10)\nslow = SMA(close, 30)\nopen_long = CROSSOVER(fast, slow).fillna(False).astype(bool)\nopen_short = CROSSUNDER(fast, slow).fillna(False).astype(bool)\ndf[\"open_long\"] = open_long\ndf[\"close_short\"] = open_long\ndf[\"open_short\"] = open_short\ndf[\"close_long\"] = open_short",
         "market": "Crypto",
         "symbol": "BTC/USDT",
         "timeframe": "1D",
@@ -141,81 +141,36 @@ Set `"strictMode": true` (default) for live-aligned next-bar-open execution;
 The `Idempotency-Key` header makes retries safe: the second call with the
 same key returns the original job instead of submitting a duplicate.
 
-### 4.1 The `code` parameter contract
+### 4.1 Code generation contract
 
-`code` is a **Python script** that the backend executes inside a sandbox.
-The script must mutate the pre-bound `df` DataFrame to add boolean signal
-columns. It is **not** a function, callable, or expression that returns
-signals — those shapes will fail validation in `_simulate_trading`.
+Agents must choose the contract by asset type. Do not mix indicator code and strategy code in the same generated artifact.
 
-**Pre-bound names** in the exec environment:
+| Asset type | Contract | Where to read more |
+|------------|----------|--------------------|
+| Chart indicator | Compute visual `output` only. No orders, no backtest columns, no `# @strategy`. | [`docs/INDICATOR_DEV_GUIDE.md`](../INDICATOR_DEV_GUIDE.md) |
+| Script Strategy | Implement `on_init(ctx)` and `on_bar(ctx, bar)`, then emit explicit order intents through `ctx.open_long`, `ctx.close_long`, `ctx.open_short`, `ctx.close_short`, `ctx.add_long`, and `ctx.add_short`. | [`docs/STRATEGY_DEV_GUIDE.md`](../STRATEGY_DEV_GUIDE.md) |
+| Indicator-to-strategy conversion | Explain the indicator visually, then translate its chart signals into explicit Script Strategy intents. | [`docs/STRATEGY_DEV_GUIDE.md`](../STRATEGY_DEV_GUIDE.md) |
 
-| Name | Type | Notes |
-|------|------|-------|
-| `df` | `pd.DataFrame` | Columns: `time, open, high, low, close, volume`. Mutate in place. |
-| `open`, `high`, `low`, `close`, `volume` | `pd.Series` | Convenience handles for the columns above |
-| `np`, `pd` | modules | Standard NumPy / pandas |
-| `params` | `dict` | Indicator params parsed from `# @param` comments + caller overrides |
-| `call_indicator(...)` | callable | Invoke another saved indicator from this script |
-| `SMA, EMA, RSI, MACD, BOLL, ATR, CROSSOVER, CROSSUNDER` | callables | Built-in technical helpers (see `app/services/backtest.py::_get_indicator_functions`) |
+For normal AI generation and product workflows, Script Strategy is the only executable strategy contract. A generated strategy must not return old DataFrame execution columns such as `df['open_long']`, `df['close_long']`, `df['open_short']`, or `df['close_short']`. Those columns belong only to a legacy low-level compatibility path and should not be generated for users.
 
-**Required output** — new scripts must add four-way execution columns to `df`:
+Default conversion rule for a two-signal long-only indicator:
 
-| Style | Required columns | When to use |
-|-------|------------------|-------------|
-| 4-way (required) | `df['open_long']`, `df['close_long']`, `df['open_short']`, `df['close_short']` (boolean Series) | All generated indicators and strategy backtests |
-
-**`trade_direction='both'` mapping (must match backtest):**
-
-| Column | Meaning at execution |
-|--------|----------------------|
-| `open_long=True` | open long; close short first if short |
-| `open_short=True` | open short; close long first if long |
-| `close_long=True` | close long only |
-| `close_short=True` | close short only |
-
-Do not generate legacy `df['buy']` / `df['sell']` for new code. `output['signals']`
-is chart-only and cannot place orders.
-
-Minimal working SMA crossover:
-
-```python
-fast = SMA(close, 10)
-slow = SMA(close, 30)
-open_long = CROSSOVER(fast, slow).fillna(False).astype(bool)
-open_short = CROSSUNDER(fast, slow).fillna(False).astype(bool)
-df['open_long'] = open_long
-df['close_short'] = open_long
-df['open_short'] = open_short
-df['close_long'] = open_short
+```text
+buy / golden cross  -> ctx.open_long(...)
+sell / death cross  -> ctx.close_long(...)
 ```
 
-Trend-pullback with RSI filter (parameterized):
+Do not infer reversal or short selling from a two-signal indicator. Generate short-side intents only when the user explicitly asks for short, both-side, reverse, hedge, or similar behavior.
+
+Basket strategies have one extra rule: `ctx.side` must be `"long"` or `"short"` only. Basket child orders must pass both keyword-only arguments:
 
 ```python
-# @param fast_len int 20 Fast EMA length
-# @param slow_len int 50 Slow EMA length
-# @param rsi_floor float 45 Min RSI for long entry
-
-ema_fast = EMA(close, params['fast_len'])
-ema_slow = EMA(close, params['slow_len'])
-rsi = RSI(close, 14)
-
-raw_open_long = (ema_fast > ema_slow) & (rsi >= params['rsi_floor'])
-raw_open_short = ema_fast < ema_slow
-
-open_long = (raw_open_long.fillna(False) & (~raw_open_long.shift(1).fillna(False))).astype(bool)
-open_short = (raw_open_short.fillna(False) & (~raw_open_short.shift(1).fillna(False))).astype(bool)
-df['open_long'] = open_long
-df['close_short'] = open_long
-df['open_short'] = open_short
-df['close_long'] = open_short
+ctx.open_child_order(layer=layer, order=order)
 ```
 
-See `docs/STRATEGY_DEV_GUIDE.md` for the full indicator-authoring guide,
-including TP/SL/trailing-stop hooks (`# @strategy ...` comments).
+The backtest center owns market, symbol, timeframe, leverage, fees, slippage, date range, and starting capital. Generated strategy code should not override those run-panel settings unless the user explicitly asks for a code-owned default parameter.
 
-### 4.1 Stream partial results (SSE)
+### 4.2 Stream partial results (SSE)
 
 For long-running jobs (`ai-optimize`, `structured-tune`, multi-round
 pipelines) the Gateway exposes a Server-Sent Events stream so an LLM client
@@ -237,7 +192,7 @@ Frame types:
 
 Reconnect with `?since=<seq>` (or the standard `Last-Event-ID` header) to
 resume from a known sequence number. If the job already finished, the server
-returns the `snapshot` and `result` frames immediately and closes — your
+returns the `snapshot` and `result` frames immediately and closes 閳?your
 client doesn't need a separate code path.
 
 ---
@@ -258,7 +213,7 @@ Validate without saving (R):
 curl -s -X POST http://localhost:8888/api/agent/v1/indicators/validate \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{ "code": "df[\"buy\"] = close > open\n..." }'
+  -d '{ "code": "df = df.copy()\noutput = {\"name\":\"Example\", \"plots\": [], \"signals\": [], \"layers\": []}" }'
 ```
 
 Save into the tenant library so it appears in the IDE list (W; max 512 KiB):
@@ -270,8 +225,10 @@ curl -s -X POST http://localhost:8888/api/agent/v1/indicators \
   -d '{ "name": "my-ma-cross", "code": "..." }'
 ```
 
-When creating a strategy with embedded `indicator_code`, the Gateway auto-saves
-and links the indicator (`link-config` is also exposed for normalizing configs).
+Indicators are chart-only. They can be saved and edited through the indicator
+library, but they cannot be backtested directly and cannot be embedded as an
+executable strategy. Convert the idea to ScriptStrategy code before backtesting
+or live trading.
 
 ---
 
@@ -281,13 +238,15 @@ and links the indicator (`link-config` is also exposed for normalizing configs).
 # list (R)
 curl -s "http://localhost:8888/api/agent/v1/strategies" -H "Authorization: Bearer $TOKEN"
 
-# create (W) — never auto-runs; status defaults to 'stopped'
+# create (W) - never auto-runs; status defaults to 'stopped'
 curl -s -X POST http://localhost:8888/api/agent/v1/strategies \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{ "strategy_name": "ma-cross-bot",
-        "strategy_type": "IndicatorStrategy",
+        "strategy_type": "ScriptStrategy",
         "market_category": "Crypto",
+        "strategy_mode": "script",
+        "strategy_code": "def on_init(ctx):\n    pass\n\ndef on_bar(ctx, bar):\n    pass\n",
         "trading_config": { "symbol": "BTC/USDT", "timeframe": "1D",
                             "initial_capital": 10000, "leverage": 1 } }'
 ```
@@ -297,7 +256,7 @@ the design doc for the rationale).
 
 ---
 
-## 7. Trading (class T) — paper-only by default
+## 7. Trading (class T) 閳?paper-only by default
 
 A token with `T` is hard-gated:
 
@@ -359,8 +318,8 @@ instead of opening raw SSE yourself.
 
 Two transports are supported via `QUANTDINGER_MCP_TRANSPORT`:
 
-* `stdio` (default) — desktop IDEs that spawn the server as a subprocess.
-* `sse` / `streamable-http` — cloud agents and remote IDEs that connect to a
+* `stdio` (default) 閳?desktop IDEs that spawn the server as a subprocess.
+* `sse` / `streamable-http` 閳?cloud agents and remote IDEs that connect to a
   long-running HTTP endpoint. Combine with `QUANTDINGER_MCP_HOST` /
   `QUANTDINGER_MCP_PORT`.
 

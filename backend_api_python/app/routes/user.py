@@ -1199,13 +1199,6 @@ def get_system_strategies():
             total_pnl = total_unrealized_pnl + total_realized_pnl
             roi = (total_pnl / initial_capital * 100) if initial_capital > 0 else 0
 
-            # Cross-sectional info
-            cs_type = ''
-            symbol_list = []
-            if isinstance(trading_config, dict):
-                cs_type = trading_config.get('cs_strategy_type') or 'single'
-                symbol_list = trading_config.get('symbol_list') or []
-
             # Timestamps are emitted as UTC ISO by SafeJSONProvider; pass
             # datetime objects straight through.
             created_at = s.get('created_at')
@@ -1218,12 +1211,10 @@ def get_system_strategies():
                 'nickname': s.get('nickname') or '',
                 'strategy_name': s.get('strategy_name') or '',
                 'strategy_type': s.get('strategy_type') or '',
-                'cs_strategy_type': cs_type,
                 'market_category': s.get('market_category') or '',
                 'execution_mode': s.get('execution_mode') or '',
                 'status': s.get('status') or 'stopped',
                 'symbol': s.get('symbol') or '',
-                'symbol_list': symbol_list,
                 'timeframe': s.get('timeframe') or '',
                 'initial_capital': initial_capital,
                 'leverage': int(s.get('leverage') or 1),

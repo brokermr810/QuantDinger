@@ -20,11 +20,15 @@ _SSE_EVENT_RE = re.compile(r"^event:\s*(\S+)\s*$", re.MULTILINE)
 _SSE_DATA_RE = re.compile(r"^data:\s*(.+)$", re.MULTILINE)
 
 
-def assert_indicator_code_size(code: str) -> None:
+def assert_code_size(code: str, *, label: str = "Code") -> None:
     if len((code or "").encode("utf-8")) > MAX_INDICATOR_CODE_BYTES:
         raise ValueError(
-            f"Indicator code exceeds {MAX_INDICATOR_CODE_BYTES // 1024} KiB MCP limit"
+            f"{label} exceeds {MAX_INDICATOR_CODE_BYTES // 1024} KiB MCP limit"
         )
+
+
+def assert_indicator_code_size(code: str) -> None:
+    assert_code_size(code, label="Indicator code")
 
 
 def assert_json_dict(name: str, value: Any) -> dict:

@@ -137,8 +137,8 @@ GET    /api/agent/v1/strategies                     class R
 POST   /api/agent/v1/strategies                     class W
 PATCH  /api/agent/v1/strategies/{id}                class W
 
-POST   /api/agent/v1/backtests                      class B  (async, returns job_id)
-GET    /api/agent/v1/backtests/{job_id}             class R
+POST   /api/agent/v1/backtest/run                      class B  (async, returns job_id)
+GET    /api/agent/v1/jobs/{job_id}                 class R
 
 POST   /api/agent/v1/experiments/regime/detect      class B
 POST   /api/agent/v1/experiments/pipeline/run       class B

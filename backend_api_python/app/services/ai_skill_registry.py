@@ -115,19 +115,19 @@ _SKILLS: tuple[SkillDefinition, ...] = (
         ui={"tone": "chart"},
     ),
     SkillDefinition(
-        id="indicator_strategy",
+        id="indicator_research",
         category="strategy",
         icon="line-chart",
-        label=_s("策略研发", "Strategy Lab"),
-        description=_s("从标的上下文出发，生成可落地到策略 IDE 的研究、代码和回测方案", "Develop a strategy workflow from the selected market context, including research, code draft, and backtest plan"),
+        label=_s("指标研发", "Indicator R&D"),
+        description=_s("生成只用于图表展示的 QuantDinger 指标代码、参数和可视化标记", "Generate chart-only QuantDinger indicator code, parameters, and visual markers"),
         prompt_template=_s(
-            "请基于 {symbol_label} 做一次策略研发。我的想法/偏好：\n交易周期：\n风险偏好：\n希望利用的信号或逻辑：\n不希望出现的行为：\n请先理解需求并补充关键问题；如信息足够，再生成适合 QuantDinger 策略 IDE 的草稿和回测验证步骤。",
-            "Run strategy research for {symbol_label}. My preferences:\nTimeframe:\nRisk profile:\nSignals or logic I want:\nBehaviors to avoid:\nFirst understand the requirement and ask key questions; if enough information is available, generate a QuantDinger Strategy IDE draft and backtest validation steps.",
+            "请基于 {symbol_label} 做一次指标研发。我的想法/偏好：\n希望观察的结构或信号：\n希望显示的标记/图层：\n可调参数：\n不希望出现的视觉干扰：\n请生成适合 QuantDinger 指标编辑器的图表指标草稿。指标只用于看图，不用于回测或实盘执行。",
+            "Run indicator research for {symbol_label}. My preferences:\nStructures or signals to visualize:\nMarkers/layers I want:\nTunable parameters:\nVisual clutter to avoid:\nGenerate a QuantDinger Indicator editor draft. Indicators are chart-only and are not used for backtest or live execution.",
         ),
-        system_instruction="Use the QuantDinger Strategy IDE workflow. Prefer IndicatorStrategy code for signal-based strategies; never output Pine Script unless explicitly requested.",
-        keywords=("指标", "indicator", "ide", "图表策略"),
-        requires=("market_data", "strategy_requirements"),
-        produces=("indicator_code", "backtest_plan"),
+        system_instruction="Use QuantDinger indicator contracts for chart-only visualization. Do not output executable strategy signals, ScriptStrategy code, or Pine Script unless explicitly requested.",
+        keywords=("指标", "indicator", "ide", "图表", "可视化"),
+        requires=("market_data", "indicator_requirements"),
+        produces=("indicator_code", "visualization_plan"),
         route="/indicator-ide",
         action_type="strategy",
         risk_level="write_draft",
@@ -163,17 +163,22 @@ _SKILLS: tuple[SkillDefinition, ...] = (
         id="script_strategy",
         category="strategy",
         icon="code",
-        label=_s("脚本策略", "Script strategy"),
-        description=_s("生成 Python ScriptStrategy，适合复杂逻辑和自动执行", "Generate Python ScriptStrategy for complex automated logic"),
+        label=_s("策略研发", "Strategy R&D"),
+        description=_s("生成可回测、可实盘复核的 Python ScriptStrategy 草稿", "Generate Python ScriptStrategy drafts for backtest and live review"),
         prompt_template=_s(
             "请为 {symbol_label} 设计一个脚本策略。我的想法/偏好：\n交易周期：\n风险偏好：\n信号逻辑：\n仓位/止损/止盈规则：\n请先和我确认需求，再生成 QuantDinger Python ScriptStrategy。",
             "Design a Python ScriptStrategy for {symbol_label}. Preferences:\nTimeframe:\nRisk profile:\nSignal logic:\nSizing/stop/take-profit rules:\nConfirm requirements with me before generating QuantDinger Python ScriptStrategy code.",
         ),
-        system_instruction="Use QuantDinger ScriptStrategy contracts and include parameter, risk, and test notes.",
+        system_instruction=(
+            "Use QuantDinger ScriptStrategy contracts. For scale-in or multiple same-direction entries, "
+            "emit explicit ctx.open_long/add_long/open_short/add_short intents; "
+            "or basket child-order intents with max-entry, price-distance, and same-bar duplicate guards. "
+            "Include code-owned risk parameters, backtest notes, and live alignment notes."
+        ),
         keywords=("脚本策略", "python", "scriptstrategy", "自动策略"),
         requires=("market_data", "strategy_requirements"),
         produces=("script_strategy_code", "backtest_plan"),
-        route="/strategy-script",
+        route="/strategy-ide?tab=script",
         action_type="strategy",
         risk_level="write_draft",
         read_only=False,
@@ -181,25 +186,25 @@ _SKILLS: tuple[SkillDefinition, ...] = (
         ui={"tone": "strategy", "workflow": "script"},
     ),
     SkillDefinition(
-        id="trading_bot_plan",
+        id="script_template_plan",
         category="strategy",
-        icon="robot",
-        label=_s("交易机器人", "Trading bot"),
-        description=_s("推荐网格、趋势、DCA等机器人参数和风控", "Recommend grid, trend, DCA, and bot parameters with risk controls"),
+        icon="code",
+        label=_s("脚本策略模板", "Script strategy template"),
+        description=_s("推荐网格、趋势、DCA等脚本策略模板参数和风控", "Recommend grid, trend, DCA, and script template parameters with risk controls"),
         prompt_template=_s(
             "请基于 {symbol_label} 帮我设计一个交易机器人方案。请先问我资金规模、风险偏好、运行周期、是否允许加仓和最大回撤限制，再给参数建议。",
-            "Design a trading bot plan for {symbol_label}. First ask about capital, risk profile, runtime horizon, whether averaging down is allowed, and max drawdown limit before suggesting parameters.",
+            "Design a backtestable script strategy template plan for {symbol_label}. First ask about capital, risk profile, runtime horizon, whether averaging down is allowed, and max drawdown limit before suggesting parameters.",
         ),
-        system_instruction="Do not place orders. Produce parameter suggestions, risk limits, and a handoff action to Trading Bot.",
+        system_instruction="Do not place orders. Produce script-template suggestions, risk limits, and a handoff action to Strategy IDE.",
         keywords=("机器人", "网格", "dca", "bot", "grid", "martingale"),
         requires=("market_data", "risk_profile"),
-        produces=("bot_plan", "risk_limits"),
-        route="/trading-bot",
+        produces=("script_strategy_plan", "risk_limits"),
+        route="/strategy-ide?tab=script",
         action_type="strategy",
         risk_level="write_draft",
         read_only=False,
         priority=86,
-        ui={"tone": "strategy", "workflow": "bot"},
+        ui={"tone": "strategy", "workflow": "script"},
     ),
     SkillDefinition(
         id="scheduled_analysis",
@@ -240,23 +245,6 @@ _SKILLS: tuple[SkillDefinition, ...] = (
         read_only=False,
         priority=82,
         ui={"tone": "watch"},
-    ),
-    SkillDefinition(
-        id="debug_logs",
-        category="operations",
-        icon="bug",
-        label=_s("排查日志", "Debug logs"),
-        description=_s("定位策略、机器人、接口异常", "Find strategy, bot, or API failures"),
-        prompt_template=_s(
-            "我会粘贴策略、交易机器人或接口日志。请帮我定位异常原因，说明影响范围，并给出可执行的修复步骤。",
-            "I will paste strategy, bot, or API logs. Find the root cause, explain impact, and suggest actionable fixes.",
-        ),
-        system_instruction="Identify symptom, likely cause, impact, fix steps, and how to verify. Ask for missing logs when needed.",
-        keywords=("日志", "报错", "错误", "debug", "error", "exception", "bug"),
-        requires=("logs_or_error",),
-        produces=("debug_report",),
-        priority=80,
-        ui={"tone": "debug"},
     ),
     SkillDefinition(
         id="setup_doctor",
@@ -927,13 +915,13 @@ def match_skills(message: str, intent: str = "", limit: int = 5) -> list[SkillDe
             score += 8
         if intent == "strategy_build" and skill.category == "strategy":
             score += 8
-        if intent == "diagnosis" and skill.id in {"debug_logs", "setup_doctor"}:
+        if intent == "diagnosis" and skill.id == "setup_doctor":
             score += 8
         if wants_strategy and skill.id == "strategy_requirements_interview":
             score += 22
-        if wants_strategy and skill.id in {"indicator_strategy", "script_strategy", "trading_bot_plan"}:
+        if wants_strategy and skill.id in {"indicator_research", "script_strategy", "script_template_plan"}:
             score += 14
-        if wants_code and skill.id in {"indicator_strategy", "script_strategy", "indicator_authoring", "indicator_validation"}:
+        if wants_code and skill.id in {"indicator_research", "script_strategy", "indicator_authoring", "indicator_validation"}:
             score += 12
         if wants_market_data and skill.id == "market_data_lookup":
             score += 24

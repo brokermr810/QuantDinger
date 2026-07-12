@@ -33,6 +33,8 @@ def get_market_indicators():
         keyword: Search keyword
         pricing_type: 'free' / 'paid' / empty (all)
         vip_free: 1/true to show VIP-free paid assets only
+        code_visibility: 'visible' / 'hidden' / empty (all)
+        min_price, max_price: Numeric price bounds
         sort_by: 'score' (default) / 'newest' / 'hot' / 'price_asc' /
                  'price_desc' / 'rating'.
                  'score' sorts by the composite multi-factor backtest score
@@ -47,6 +49,21 @@ def get_market_indicators():
         pricing_type = request.args.get('pricing_type', '').strip() or None
         vip_free_raw = request.args.get('vip_free', '').strip().lower()
         vip_free = vip_free_raw in ('1', 'true', 'yes', 'y', 'on')
+        code_visibility = request.args.get('code_visibility', '').strip().lower() or None
+        def _parse_price_bound(value):
+            value = (value or '').strip()
+            if not value:
+                return None
+            try:
+                parsed = float(value)
+                return parsed if parsed >= 0 else None
+            except (TypeError, ValueError):
+                return None
+
+        min_price = _parse_price_bound(request.args.get('min_price'))
+        max_price = _parse_price_bound(request.args.get('max_price'))
+        if min_price is not None and max_price is not None and min_price > max_price:
+            min_price, max_price = max_price, min_price
         sort_by = request.args.get('sort_by', 'score').strip()
         asset_type = request.args.get('asset_type', '').strip() or None
         
@@ -65,6 +82,9 @@ def get_market_indicators():
             keyword=keyword if keyword else None,
             pricing_type=pricing_type,
             vip_free=vip_free,
+            code_visibility=code_visibility,
+            min_price=min_price,
+            max_price=max_price,
             sort_by=sort_by,
             user_id=g.user_id,
             accept_language=accept_lang,
@@ -149,7 +169,8 @@ def sync_purchased_indicator(indicator_id: int):
 
     Preconditions:
         - Caller must have purchased the indicator
-        - Original listing must still be published
+        - Published listings sync from the latest marketplace code
+        - Unpublished/deleted listings can still restore from the purchase snapshot
     """
     try:
         service = get_community_service()
@@ -260,6 +281,28 @@ def get_author_sales():
         return jsonify({'code': 1, 'msg': 'success', 'data': result})
     except Exception as e:
         logger.error(f"get_author_sales failed: {e}")
+        return jsonify({'code': 0, 'msg': str(e), 'data': None}), 500
+
+
+@community_blp.route("/author/indicators/<int:indicator_id>/unpublish", methods=["POST"])
+@login_required
+def author_unpublish_indicator(indicator_id: int):
+    """Let an author unpublish their own marketplace asset."""
+    try:
+        data = request.get_json() or {}
+        note = (data.get("note") or "").strip()
+        service = get_community_service()
+        success, message = service.author_unpublish_asset(
+            user_id=g.user_id,
+            indicator_id=indicator_id,
+            note=note,
+        )
+        if success:
+            return jsonify({'code': 1, 'msg': message, 'data': None})
+        status = 404 if message == 'indicator_not_found' else 400
+        return jsonify({'code': 0, 'msg': message, 'data': None}), status
+    except Exception as e:
+        logger.error(f"author_unpublish_indicator failed: {e}")
         return jsonify({'code': 0, 'msg': str(e), 'data': None}), 500
 
 
@@ -378,13 +421,13 @@ def get_my_comment(indicator_id: int):
 
 
 # ==========================================
-# Live performance
+# Market performance
 # ==========================================
 
 @community_blp.route("/indicators/<int:indicator_id>/performance", methods=["GET"])
 @login_required
 def get_indicator_performance(indicator_id: int):
-    """Get live performance statistics for an indicator."""
+    """Get marketplace performance statistics for an asset."""
     try:
         service = get_community_service()
         result = service.get_indicator_performance(indicator_id)
@@ -416,6 +459,10 @@ def get_pending_indicators():
         page: Page number (default 1)
         page_size: Page size (default 20)
         review_status: 'pending' / 'approved' / 'rejected' / 'all'
+        keyword: Search name, description or author
+        asset_type: 'indicator' / 'script_template' / empty
+        pricing_type: 'free' / 'paid' / 'vip_free' / empty
+        sort_by: 'newest' / 'oldest' / 'price_asc' / 'price_desc'
     """
     try:
         if not _is_admin():
@@ -424,13 +471,21 @@ def get_pending_indicators():
         page = int(request.args.get('page', 1))
         page_size = int(request.args.get('page_size', 20))
         review_status = request.args.get('review_status', 'pending').strip() or 'pending'
+        keyword = request.args.get('keyword', '').strip() or None
+        asset_type = request.args.get('asset_type', '').strip() or None
+        pricing_type = request.args.get('pricing_type', '').strip() or None
+        sort_by = request.args.get('sort_by', 'newest').strip() or 'newest'
         page_size = min(max(page_size, 1), 100)
         
         service = get_community_service()
         result = service.get_pending_indicators(
             page=page,
             page_size=page_size,
-            review_status=review_status
+            review_status=review_status,
+            keyword=keyword,
+            asset_type=asset_type,
+            pricing_type=pricing_type,
+            sort_by=sort_by,
         )
         
         return jsonify({'code': 1, 'msg': 'success', 'data': result})

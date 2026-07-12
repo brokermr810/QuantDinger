@@ -193,7 +193,7 @@ def _record_runtime_fill(
                 cur.execute(
                     """
                     UPDATE strategy_order_intents
-                    SET status = CASE WHEN %s > 0 THEN 'filled' ELSE status END,
+                    SET status = CASE WHEN %s > 0 THEN 'partially_filled' ELSE status END,
                         updated_at = NOW()
                     WHERE id = %s
                     """,

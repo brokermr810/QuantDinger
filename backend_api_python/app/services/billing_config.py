@@ -8,6 +8,7 @@ DEFAULT_BILLING_CONFIG = {
     "enabled": False,
     "cost_ai_analysis": 10,
     "cost_ai_code_gen": 30,
+    "cost_ai_indicator_to_strategy": 30,
     "cost_ai_tuning": 50,
     "cost_ai_copilot_chat": 5,
     "cost_ai_copilot_image": 15,
@@ -17,6 +18,7 @@ DEFAULT_BILLING_CONFIG = {
 FEATURE_NAMES = {
     "ai_analysis": "AI Analysis",
     "ai_code_gen": "AI Code Generation",
+    "ai_indicator_to_strategy": "AI Indicator to Strategy",
     "ai_tuning": "AI Parameter Tuning",
     "ai_copilot_chat": "AI Copilot Chat",
     "ai_copilot_image": "AI Copilot Image Analysis",

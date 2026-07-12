@@ -43,6 +43,28 @@ def test_update_strategy_blocks_running_without_trade_scope(fresh_module):
     assert out.get("status") == 403
 
 
+def test_create_strategy_rejects_legacy_indicator_strategy(fresh_module):
+    out = fresh_module.create_strategy(
+        "Legacy indicator strategy",
+        "Crypto",
+        {"symbol": "BTC/USDT"},
+        strategy_type="IndicatorStrategy",
+    )
+    assert out.get("error") is True
+    assert out.get("status") == 400
+    assert "ScriptStrategy" in out["body"]["message"]
+
+
+def test_create_strategy_requires_script_code_or_source_id(fresh_module):
+    out = fresh_module.create_strategy(
+        "Empty script strategy",
+        "Crypto",
+        {"symbol": "BTC/USDT"},
+    )
+    assert out.get("error") is True
+    assert out.get("status") == 400
+
+
 def test_stop_strategy_requires_confirmation(fresh_module):
     out = fresh_module.stop_strategy(1)
     assert out.get("error") is True
@@ -61,6 +83,36 @@ def test_indicator_code_size_rejected_in_mcp(monkeypatch, fresh_module):
     huge = "x" * (sec.MAX_INDICATOR_CODE_BYTES + 1)
     with pytest.raises(ValueError, match="KiB"):
         fresh_module.validate_indicator_code(huge)
+
+
+def test_submit_backtest_uses_script_strategy_payload(monkeypatch, fresh_module):
+    captured = {}
+
+    def fake_post(path, json=None, headers=None):
+        captured["path"] = path
+        captured["json"] = json
+        captured["headers"] = headers
+        return {"job_id": "job-test"}
+
+    monkeypatch.setattr(fresh_module, "_post", fake_post)
+    out = fresh_module.submit_backtest(
+        "def on_init(ctx):\n    pass\n\ndef on_bar(ctx, bar):\n    pass\n",
+        "Crypto",
+        "BTC/USDT",
+        "1H",
+        "2024-01-01",
+        "2024-06-30",
+        script_params={"fast": 10},
+        market_type="swap",
+        idempotency_key="same-key",
+    )
+
+    assert out == {"job_id": "job-test"}
+    assert captured["path"] == "/api/agent/v1/backtest/run"
+    assert captured["json"]["script_params"] == {"fast": 10}
+    assert "indicator_params" not in captured["json"]
+    assert captured["json"]["market_type"] == "swap"
+    assert captured["headers"] == {"Idempotency-Key": "same-key"}
 
 
 def test_parse_sse_chunk():

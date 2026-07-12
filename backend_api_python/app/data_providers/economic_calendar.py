@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
@@ -156,6 +157,14 @@ _ASSET_LABELS = {
     "JPY": {"label": "\u65e5\u5143", "label_en": "Japanese Yen"},
 }
 
+
+def _finnhub_free_only_enabled(value: Optional[str] = None) -> bool:
+    if value is None:
+        value = os.getenv("FINNHUB_FREE_ONLY")
+    if value is not None:
+        return str(value).strip().lower() not in ("0", "false", "no", "off")
+    return bool(FinnhubConfig.FREE_ONLY)
+
 _EVENT_TYPE_RULES: Tuple[Tuple[Tuple[str, ...], str, Tuple[str, ...]], ...] = (
     (("cpi", "inflation", "ppi", "\u901a\u80c0", "\u7269\u4ef7"), "inflation", ("DXY", "US10Y", "SPX", "NASDAQ", "GOLD", "BTC")),
     (("fomc", "fed", "federal funds", "interest rate", "rate decision", "\u5229\u7387", "\u964d\u606f", "\u52a0\u606f"), "central_bank", ("DXY", "US10Y", "SPX", "GOLD", "BTC")),
@@ -174,6 +183,8 @@ def get_economic_calendar_payload() -> Dict[str, Any]:
     optionally try Trading Economics when credentials are configured, and only
     attempt Finnhub when FINNHUB_FREE_ONLY=false.
     """
+    finnhub_free_only_override = os.getenv("FINNHUB_FREE_ONLY")
+    finnhub_api_key_override = os.getenv("FINNHUB_API_KEY")
     if TradingEconomicsConfig.CONFIGURED:
         try:
             events = _fetch_tradingeconomics_calendar()
@@ -222,7 +233,7 @@ def get_economic_calendar_payload() -> Dict[str, Any]:
         if fallback:
             return fallback
 
-    if FinnhubConfig.FREE_ONLY:
+    if _finnhub_free_only_enabled(finnhub_free_only_override):
         return {
             "events": [],
             "status": "empty",
@@ -231,7 +242,7 @@ def get_economic_calendar_payload() -> Dict[str, Any]:
             "message": "Free economic calendar sources returned no events. Finnhub paid calendar is skipped because FINNHUB_FREE_ONLY=true.",
         }
 
-    if not APIKeys.is_configured("FINNHUB_API_KEY"):
+    if not (str(finnhub_api_key_override or "").strip() or APIKeys.is_configured("FINNHUB_API_KEY")):
         return {
             "events": [],
             "status": "missing_config",
@@ -241,7 +252,7 @@ def get_economic_calendar_payload() -> Dict[str, Any]:
         }
 
     try:
-        events = _fetch_finnhub_calendar()
+        events = _fetch_finnhub_calendar(finnhub_api_key_override)
         if events:
             logger.info("Economic calendar loaded from Finnhub: %d events", len(events))
             return {
@@ -425,17 +436,18 @@ def _fetch_tradingeconomics_calendar() -> List[Dict[str, Any]]:
     return events
 
 
-def _fetch_finnhub_calendar() -> List[Dict[str, Any]]:
+def _fetch_finnhub_calendar(api_key: Optional[str] = None) -> List[Dict[str, Any]]:
     today = datetime.now().date()
     date_from = (today - timedelta(days=_CALENDAR_LOOKBACK_DAYS)).isoformat()
     date_to = (today + timedelta(days=_CALENDAR_LOOKAHEAD_DAYS)).isoformat()
+    token = str(api_key or APIKeys.FINNHUB_API_KEY or "").strip()
 
     resp = requests.get(
         f"{FinnhubConfig.BASE_URL}/calendar/economic",
         params={
             "from": date_from,
             "to": date_to,
-            "token": APIKeys.FINNHUB_API_KEY,
+            "token": token,
         },
         timeout=FinnhubConfig.TIMEOUT,
     )

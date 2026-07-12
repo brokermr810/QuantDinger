@@ -11,13 +11,10 @@ from app.services.live_trading.capabilities import (
 
 def test_supported_crypto_exchange_ids_are_canonical():
     assert supported_crypto_exchange_ids() == set(CRYPTO_VENUE_CAPABILITIES)
-    assert "coinbase_exchange" not in supported_crypto_exchange_ids()
-    assert "coinbase_exchange" in supported_crypto_exchange_ids(include_aliases=True)
+    assert supported_crypto_exchange_ids() == {"binance", "bitget", "bybit", "okx", "gate", "htx"}
 
 
 def test_exchange_aliases_canonicalize():
-    assert canonical_exchange_id("coinbase_exchange") == "coinbaseexchange"
-    assert canonical_exchange_id("CoinbaseExchange") == "coinbaseexchange"
     assert canonical_exchange_id("binance") == "binance"
 
 
@@ -27,6 +24,5 @@ def test_policy_uses_capability_matrix():
 
 
 def test_market_type_filters():
-    assert "coinbaseexchange" in crypto_exchange_ids_for_market_type("spot")
-    assert "coinbaseexchange" not in crypto_exchange_ids_for_market_type("swap")
-    assert "kraken" in crypto_exchange_ids_for_market_type("futures")
+    assert crypto_exchange_ids_for_market_type("spot") == {"binance", "bitget", "bybit", "okx", "gate", "htx"}
+    assert crypto_exchange_ids_for_market_type("futures") == {"binance", "bitget", "bybit", "okx", "gate", "htx"}

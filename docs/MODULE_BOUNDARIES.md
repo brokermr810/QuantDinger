@@ -28,7 +28,7 @@ These files mix multiple responsibilities and should be decomposed gradually:
 | `app/startup.py` | worker boot, strategy restore, process-local singletons | distributed worker ownership guards |
 | `app/routes/strategy.py` | lifecycle, templates, AI generation | route modules per subdomain |
 | `app/routes/strategy_account_routes.py` | account snapshot and account position mirror | account service facade |
-| `app/routes/strategy_backtest_routes.py` | strategy backtest endpoint facade | backtest request schema and service facade |
+| `app/routes/backtest_center.py` | unified V2 backtest endpoint facade | one request schema and one simulation service facade |
 | `app/routes/strategy_deviation_routes.py` | dry-run deviation endpoint | deviation service facade |
 | `app/routes/strategy_grid_routes.py` | grid resting order endpoint | grid route facade |
 | `app/routes/strategy_ledger_routes.py` | trades, equity curve, performance endpoints | ledger/read-model service facade |

@@ -535,10 +535,6 @@ def fetch_account_snapshot(*, user_id: int, credential_id: int) -> Dict[str, Any
         "gate",
         "gateio",
         "htx",
-        "huobi",
-        "kraken",
-        "coinbase",
-        "coinbaseexchange",
     ):
         sp, st, od = _fetch_multi_crypto_snapshot(exchange_config, exchange_id, errors)
         swap_all.extend(sp)

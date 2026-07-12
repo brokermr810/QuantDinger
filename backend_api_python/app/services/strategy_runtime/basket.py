@@ -10,7 +10,7 @@ from app.utils.db import get_db_connection
 from app.utils.logger import get_logger
 
 from .events import append_runtime_event
-from .order_intents import OrderIntentService
+from .order_intents import OrderIntent, OrderIntentService
 
 logger = get_logger(__name__)
 
@@ -250,26 +250,29 @@ class BasketRuntime:
             idempotency_key=key,
             payload=payload or {},
         )
-        intent = self._order_intents.create_intent(
-            idempotency_key=key,
-            symbol=self.symbol,
-            side=("buy" if self.side == "long" else "sell"),
-            position_side=self.side,
-            reduce_only=action_norm in ("reduce", "close"),
-            quantity=float(quantity or 0.0),
-            notional=float(notional or 0.0),
-            limit_price=float(price or 0.0),
-            execution_algo=str(execution_algo or "market"),
-            basket_id=self.basket_id,
-            basket_order_id=int(basket_order_db_id or 0),
-            payload={
-                **(payload or {}),
-                "signal_type": signal_type,
-                "layer_index": int(layer or 0),
-                "order_index": int(order or 0),
-                "basket_id": self.basket_id,
-            },
-        )
+        if self.strategy_id <= 0:
+            intent = OrderIntent(0, key, "ephemeral", existing=False)
+        else:
+            intent = self._order_intents.create_intent(
+                idempotency_key=key,
+                symbol=self.symbol,
+                side=("buy" if self.side == "long" else "sell"),
+                position_side=self.side,
+                reduce_only=action_norm in ("reduce", "close"),
+                quantity=float(quantity or 0.0),
+                notional=float(notional or 0.0),
+                limit_price=float(price or 0.0),
+                execution_algo=str(execution_algo or "market"),
+                basket_id=self.basket_id,
+                basket_order_id=int(basket_order_db_id or 0),
+                payload={
+                    **(payload or {}),
+                    "signal_type": signal_type,
+                    "layer_index": int(layer or 0),
+                    "order_index": int(order or 0),
+                    "basket_id": self.basket_id,
+                },
+            )
         if intent.id > 0:
             self._mark_basket_order_intent(basket_order_db_id, intent.id)
         self._emit_script_order(
@@ -278,6 +281,7 @@ class BasketRuntime:
             quantity=float(quantity or 0.0),
             notional=float(notional or 0.0),
             price=float(price or 0.0),
+            execution_algo=str(execution_algo or "market"),
             idempotency_key=key,
             order_intent_id=int(intent.id or 0),
             basket_order_id=int(basket_order_db_id or 0),
@@ -303,6 +307,7 @@ class BasketRuntime:
         quantity: float,
         notional: float,
         price: float,
+        execution_algo: str,
         idempotency_key: str,
         order_intent_id: int,
         basket_order_id: int,
@@ -316,8 +321,8 @@ class BasketRuntime:
         amount = quantity if quantity > 0 else notional
         extra: Dict[str, Any] = {}
         if notional > 0:
-            # Basket templates express child sizing as quote notional (for
-            # example 50 USDT). Keep that explicit so live and backtest sizing
+            # Basket templates express child sizing as quote stake/margin
+            # before leverage. Keep that explicit so live and backtest sizing
             # do not fall back to legacy base-quantity semantics.
             extra["script_quote_amount"] = float(notional)
         elif quantity > 0:
@@ -329,6 +334,7 @@ class BasketRuntime:
                     "price": price if price > 0 else None,
                     "amount": amount if amount > 0 else None,
                     "intent": signal_type,
+                    "execution_algo": str(execution_algo or "market"),
                     "reason": str((payload or {}).get("reason") or f"basket_{action_norm}").strip(),
                     **extra,
                     "strategy_run_id": self.strategy_run_id,

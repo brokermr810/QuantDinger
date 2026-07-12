@@ -20,6 +20,8 @@ from app.services.strategy_script_runtime import ScriptPosition
 def test_starts_flat():
     p = ScriptPosition()
     assert p.is_flat()
+    assert not p.is_long()
+    assert not p.is_short()
     assert int(p) == 0
     assert bool(p) is False
     assert p.long_size == 0.0
@@ -49,6 +51,8 @@ def test_open_long_weighted_average_entry():
     p.open_long(100.0, 2.0)
     p.open_long(110.0, 2.0)
 
+    assert p.is_long()
+    assert not p.is_short()
     assert p.long_size == 4.0
     assert abs(p.long_entry - 105.0) < 1e-9
 
@@ -78,6 +82,8 @@ def test_reduce_long_caps_to_available_size():
 def test_close_short_then_open_short_resets_entry():
     p = ScriptPosition()
     p.open_short(50.0, 2.0)
+    assert p.is_short()
+    assert not p.is_long()
     qty, avg = p.close_short()
     assert qty == 2.0
     assert avg == 50.0

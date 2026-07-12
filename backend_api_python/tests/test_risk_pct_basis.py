@@ -18,6 +18,33 @@ def _make_executor() -> TradingExecutor:
     return TradingExecutor.__new__(TradingExecutor)
 
 
+def _code_risk_cfg(
+    *,
+    stop_loss: float = 0.0,
+    take_profit: float = 0.0,
+    trailing_enabled: bool = False,
+    trailing_stop: float = 0.0,
+    trailing_activation: float = 0.0,
+) -> dict:
+    return {
+        "enable_server_side_stop_loss": True,
+        "enable_server_side_take_profit": True,
+        "_strategy_cfg_from_code": {
+            "exitOwner": "engine",
+            "risk": {
+                "stopLossPct": stop_loss,
+                "takeProfitPct": take_profit,
+                "trailing": {
+                    "enabled": trailing_enabled,
+                    "pct": trailing_stop,
+                    "activationPct": trailing_activation,
+                },
+            },
+            "position": {"entryPct": 1.0},
+        },
+    }
+
+
 def test_no_risk_pct_basis_helper_present():
     """The basis toggle was removed. Re-introducing it would silently
     flip live-trading risk thresholds — keep this test as a guard."""
@@ -27,7 +54,7 @@ def test_no_risk_pct_basis_helper_present():
 def test_stop_loss_triggers_on_underlying_price_move_only(monkeypatch):
     ex = _make_executor()
 
-    cfg = {"stop_loss_pct": 9, "enable_server_side_stop_loss": True}
+    cfg = _code_risk_cfg(stop_loss=0.09)
     monkeypatch.setattr(ex, "_get_current_positions", lambda *a, **k: [
         {"side": "long", "entry_price": 100.0, "size": 1.0, "symbol": "BTC/USDT"}
     ])
@@ -57,8 +84,7 @@ def test_legacy_margin_field_is_ignored(monkeypatch):
     ex = _make_executor()
 
     cfg = {
-        "stop_loss_pct": 9,
-        "enable_server_side_stop_loss": True,
+        **_code_risk_cfg(stop_loss=0.09),
         "risk_pct_basis": "margin",  # legacy field — must be ignored
     }
     monkeypatch.setattr(ex, "_get_current_positions", lambda *a, **k: [
@@ -78,7 +104,7 @@ def test_legacy_margin_field_is_ignored(monkeypatch):
 def test_take_profit_threshold_uses_price_move(monkeypatch):
     ex = _make_executor()
 
-    cfg = {"take_profit_pct": 16, "enable_server_side_take_profit": True}
+    cfg = _code_risk_cfg(take_profit=0.16)
     monkeypatch.setattr(ex, "_get_current_positions", lambda *a, **k: [
         {"side": "long", "entry_price": 100.0, "size": 1.0,
          "highest_price": 0, "lowest_price": 0, "symbol": "BTC/USDT"}
@@ -136,7 +162,7 @@ def test_to_ratio_treats_input_as_percent_not_ratio():
 def test_sub_one_percent_stop_loss_triggers_at_underlying_price(monkeypatch):
     """0.01% SL must fire on 0.01% adverse price move, NOT 1%."""
     ex = _make_executor()
-    cfg = {"stop_loss_pct": 0.01, "enable_server_side_stop_loss": True}
+    cfg = _code_risk_cfg(stop_loss=0.0001)
     monkeypatch.setattr(ex, "_get_current_positions", lambda *a, **k: [
         {"side": "long", "entry_price": 100.0, "size": 1.0, "symbol": "BTC/USDT"}
     ])
@@ -171,7 +197,7 @@ def test_sub_one_percent_stop_loss_triggers_at_underlying_price(monkeypatch):
 def test_half_percent_take_profit_triggers_correctly(monkeypatch):
     """0.5% TP must fire on 0.5% price move, NOT 50%."""
     ex = _make_executor()
-    cfg = {"take_profit_pct": 0.5, "enable_server_side_take_profit": True}
+    cfg = _code_risk_cfg(take_profit=0.005)
     monkeypatch.setattr(ex, "_get_current_positions", lambda *a, **k: [
         {"side": "long", "entry_price": 100.0, "size": 1.0,
          "highest_price": 0, "lowest_price": 0, "symbol": "BTC/USDT"}
@@ -201,11 +227,12 @@ def test_live_trailing_waits_until_round_trip_fees_are_covered(monkeypatch):
     ex = _make_executor()
     ex._exchange_fee_cache = {}
     cfg = {
-        "trailing_enabled": True,
-        "trailing_stop_pct": 0.03,        # flat config percent: 0.03% -> 0.0003
-        "trailing_activation_pct": 0.09,  # 0.09% -> 0.0009
+        **_code_risk_cfg(
+            trailing_enabled=True,
+            trailing_stop=0.0003,
+            trailing_activation=0.0009,
+        ),
         "commission": 0.05,              # 0.05% taker fee
-        "enable_server_side_take_profit": True,
     }
     monkeypatch.setattr(ex, "_update_position", lambda *a, **k: None)
 

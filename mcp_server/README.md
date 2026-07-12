@@ -29,8 +29,8 @@ remains the source of truth.
 - **Bounded long jobs:** `stream_job_until_done` caps event count and duration;
   `wait_for_job` caps poll time. Tune via env vars below.
 - **LLM cost guard:** `submit_ai_optimize` requires `confirm_llm_usage=true`.
-- **Payload limits:** indicator Python source is capped at **512 KiB** on
-  both Gateway and MCP client.
+- **Payload limits:** indicator and strategy Python source are capped at
+  **512 KiB** on both Gateway and MCP client.
 
 ## What it exposes
 
@@ -59,9 +59,9 @@ Trading-class (T) tools.
 | `save_indicator` | W | Persist to indicator library |
 | `list_indicators` | R | Tenant indicator list |
 | `get_indicator` | R | One indicator with code |
-| `create_strategy` | W | Create stopped strategy (+ auto-save indicator) |
+| `create_strategy` | W | Create stopped ScriptStrategy (`strategy_code` or `script_source_id`) |
 | `update_strategy` | W | Patch strategy fields (blocks `status=running`) |
-| `submit_backtest` | B | Queue a backtest (`strict_mode`, `strategy_config`, `indicator_params`) |
+| `submit_backtest` | B | Queue a ScriptStrategy backtest (`strict_mode`, `strategy_config`, `script_params`) |
 | `regime_detect` | B | Synchronous regime detection |
 | `submit_experiment_pipeline` | B | Queue legacy grid pipeline |
 | `submit_structured_tune` | B | Queue grid/random tuning |
@@ -155,7 +155,8 @@ agent tokens, scoped to the capabilities the client actually needs.
 
 Recommended scopes:
 
-- Indicator authoring and backtesting: **R + W + B**
+- Indicator authoring: **R + W**
+- ScriptStrategy authoring and backtesting: **R + W + B**
 - Runtime overview only: **R**
 - Runtime stop from MCP: **R + T** (and call `stop_strategy` with `confirm_stop=true`)
 - Quick order placement: **R + T**. Paper orders work with paper-only tokens;
@@ -200,23 +201,42 @@ Typical parameters:
 }
 ```
 
-### Create an indicator and backtest it
+### Create an indicator
 
 Recommended flow:
 
 1. `get_indicator_authoring_contract`
 2. `validate_indicator_code`
 3. `save_indicator`
-4. `create_strategy`
-5. `submit_backtest`
-6. `wait_for_job` or `stream_job_until_done`
 
 Prompt example:
 
 ```text
 Call `get_indicator_authoring_contract`, write a simple SMA crossover indicator,
-validate it with `validate_indicator_code`, save it with `save_indicator`, then
-run `submit_backtest` on BTC/USDT 1H from 2024-01-01 to 2024-06-30.
+validate it with `validate_indicator_code`, then save it with `save_indicator`.
+Do not run `submit_backtest` on indicator code; indicators are chart-only.
+```
+
+### Create and backtest a ScriptStrategy
+
+Executable strategies must be ScriptStrategy code with `on_init(ctx)` and
+`on_bar(ctx, bar)`. To trade an indicator idea, first convert its visual
+signals into explicit ScriptStrategy intents such as `ctx.open_long(...)` and
+`ctx.close_long(...)`; do not treat a chart `sell` marker as automatic short
+entry unless the user explicitly asks for reversal or shorting.
+
+Recommended flow:
+
+1. Write or obtain ScriptStrategy code.
+2. `create_strategy` with `strategy_code` or `script_source_id`.
+3. `submit_backtest` with the same ScriptStrategy `code`.
+4. `wait_for_job` or `stream_job_until_done`.
+
+Prompt example:
+
+```text
+Write a long-only EMA crossover ScriptStrategy. Use `submit_backtest` on
+BTC/USDT 1H from 2024-01-01 to 2024-06-30 with script_params if needed.
 Use `wait_for_job` for the result.
 ```
 

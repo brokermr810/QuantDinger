@@ -78,5 +78,20 @@ if [ "$SECRET_LEN" -lt 32 ]; then
 fi
 echo ""
 
+# Keep credential encryption independent from JWT/session key rotation.
+CURRENT_CREDENTIAL_KEY=$(grep -E "^CREDENTIAL_ENCRYPTION_KEY=" /app/.env 2>/dev/null | cut -d'=' -f2- | tr -d '"' | tr -d "'" | xargs || true)
+CURRENT_CREDENTIAL_KEY=${CURRENT_CREDENTIAL_KEY:-${CREDENTIAL_ENCRYPTION_KEY:-}}
+if [ -z "$CURRENT_CREDENTIAL_KEY" ]; then
+    NEW_CREDENTIAL_KEY=$(python3 -c "import secrets; print(secrets.token_hex(32))")
+    if [ -f /app/.env ] && [ -w /app/.env ]; then
+        echo "CREDENTIAL_ENCRYPTION_KEY=${NEW_CREDENTIAL_KEY}" >> /app/.env
+        echo "[AUTO] Generated persistent CREDENTIAL_ENCRYPTION_KEY."
+    else
+        export CREDENTIAL_ENCRYPTION_KEY="$NEW_CREDENTIAL_KEY"
+        echo "[AUTO] Generated in-memory CREDENTIAL_ENCRYPTION_KEY."
+        echo "[TIP]  Set a persistent CREDENTIAL_ENCRYPTION_KEY before saving broker credentials."
+    fi
+fi
+
 # Start the application
 exec "$@"

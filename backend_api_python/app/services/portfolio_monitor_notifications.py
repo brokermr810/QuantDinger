@@ -25,6 +25,12 @@ def resolve_notification_delivery(user_id: int, notification_config: Optional[Di
         channels = ["browser"]
 
     targets: Dict[str, Any] = dict(cfg.get("targets") or {})
+    if not (targets.get("webhook") or "").strip() and (targets.get("webhook_url") or "").strip():
+        targets["webhook"] = (targets.get("webhook_url") or "").strip()
+    if not (targets.get("webhook_signing_secret") or "").strip() and (targets.get("webhookSigningSecret") or "").strip():
+        targets["webhook_signing_secret"] = (targets.get("webhookSigningSecret") or "").strip()
+    if not (targets.get("webhook_token") or "").strip() and (targets.get("webhookToken") or "").strip():
+        targets["webhook_token"] = (targets.get("webhookToken") or "").strip()
 
     try:
         with get_db_connection() as db:
@@ -52,6 +58,10 @@ def resolve_notification_delivery(user_id: int, notification_config: Optional[Di
             targets["telegram_bot_token"] = (settings.get("telegram_bot_token") or "").strip()
         if not (targets.get("webhook") or "").strip():
             targets["webhook"] = (settings.get("webhook_url") or "").strip()
+        if not (targets.get("webhook_token") or "").strip():
+            targets["webhook_token"] = (settings.get("webhook_token") or "").strip()
+        if not (targets.get("webhook_signing_secret") or "").strip():
+            targets["webhook_signing_secret"] = (settings.get("webhook_signing_secret") or "").strip()
     except Exception as exc:
         logger.warning("Failed to load notification settings for user %s: %s", user_id, exc)
 

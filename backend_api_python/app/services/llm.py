@@ -240,6 +240,11 @@ class LLMService:
             kwargs["proxies"] = {"http": proxy_url, "https": proxy_url}
 
         try:
+            if not stream and not proxy_url:
+                session.close()
+                post_kwargs = dict(kwargs)
+                post_kwargs.pop("stream", None)
+                return requests.post(url, **post_kwargs)
             response = session.post(url, **kwargs)
         except requests.exceptions.RequestException as exc:
             session.close()

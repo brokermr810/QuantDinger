@@ -10,24 +10,19 @@ from app.services.live_trading.records import (
 def test_strategy_allowed_symbols_includes_trading_config_symbol():
     sc = {
         "symbol": "",
-        "trading_config": {"symbol": "SOL/USDT", "symbol_list": []},
+        "trading_config": {"symbol": "SOL/USDT"},
     }
     assert strategy_allowed_symbols(sc) == {"SOL/USDT"}
 
 
-def test_strategy_allowed_symbols_includes_row_and_list():
+def test_strategy_allowed_symbols_includes_row_and_trading_config_symbol():
     sc = {
         "symbol": "BTC/USDT",
-        "trading_config": {
-            "symbol": "ETH/USDT",
-            "symbol_list": ["Crypto:SOL/USDT", "BNBUSDT"],
-        },
+        "trading_config": {"symbol": "ETH/USDT"},
     }
     allowed = strategy_allowed_symbols(sc)
     assert "BTC/USDT" in allowed
     assert "ETH/USDT" in allowed
-    assert "SOL/USDT" in allowed
-    assert normalize_strategy_symbol("BNBUSDT").upper() in allowed
 
 
 def test_lookup_exchange_side_qty_symbol_aliases():

@@ -62,6 +62,7 @@ class GridEngine:
         self._initial_retry_sec = 30.0
         self._initial_market_attempts = 0
         self._initial_market_max_attempts = 3
+        self._last_entry_order_ts = 0.0
 
     @property
     def stop_requested(self) -> bool:
@@ -527,23 +528,41 @@ class GridEngine:
             return 0
         if self._runtime_params.get("waterfall_pause"):
             return 0
+        now = time.time()
+        if self.cfg.order_frequency > 0 and self._last_entry_order_ts > 0:
+            if now - self._last_entry_order_ts < float(self.cfg.order_frequency):
+                return 0
         self._dedupe_open_entry_orders("long_entry")
         self._dedupe_open_entry_orders("short_entry")
         _, cells = self._levels_and_cells()
         cell_states = self._cell_state_by_index()
         placed = 0
+        open_entries = sum(
+            1
+            for order in self._orders.list_open(self.strategy_id)
+            if str(order.purpose or "") in ("long_entry", "short_entry")
+        )
+        remaining_slots = max(0, int(self.cfg.max_open_orders or 0) - int(open_entries or 0))
+        if remaining_slots <= 0:
+            return 0
         direction = self.cfg.grid_direction
         for cell in cells:
+            if placed >= remaining_slots:
+                break
             if direction in ("long", "neutral") and cell.lower_price < current_price:
                 if self._cell_allows_entry(cell.index, "long_entry", cell_states):
                     if self._place_limit(cell, "long_entry", "buy", cell.lower_price, reduce_only=False, pos_side="long"):
                         placed += 1
                         cell_states[int(cell.index)] = GridCellState.BUY_OPEN
+                        self._last_entry_order_ts = now
+                        if placed >= remaining_slots:
+                            break
             if direction in ("short", "neutral") and cell.upper_price > current_price:
                 if self._cell_allows_entry(cell.index, "short_entry", cell_states):
                     if self._place_limit(cell, "short_entry", "sell", cell.upper_price, reduce_only=False, pos_side="short"):
                         placed += 1
                         cell_states[int(cell.index)] = GridCellState.SELL_OPEN
+                        self._last_entry_order_ts = now
         return placed
 
     def _active_cell_for_price(

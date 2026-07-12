@@ -266,7 +266,31 @@ def _touch_token_last_used(token_id: int) -> None:
 
 # ─────────────────────────── audit ───────────────────────────
 
-_REDACT_KEYS = {"password", "secret", "token", "apikey", "api_key", "authorization"}
+_REDACT_KEYS = {
+    "password",
+    "secret",
+    "secretkey",
+    "secret_key",
+    "token",
+    "apikey",
+    "api_key",
+    "authorization",
+    "passphrase",
+    "privatekey",
+    "private_key",
+    "accesstoken",
+    "access_token",
+    "refreshtoken",
+    "refresh_token",
+    "bottoken",
+    "bot_token",
+    "webhooksecret",
+    "webhook_secret",
+    "signingsecret",
+    "signing_secret",
+    "clientsecret",
+    "client_secret",
+}
 
 
 def _redact(obj: Any, depth: int = 0) -> Any:
@@ -275,7 +299,7 @@ def _redact(obj: Any, depth: int = 0) -> Any:
     if isinstance(obj, dict):
         out = {}
         for k, v in obj.items():
-            if str(k).lower() in _REDACT_KEYS:
+            if str(k).replace("-", "_").lower() in _REDACT_KEYS:
                 out[k] = "<redacted>"
             else:
                 out[k] = _redact(v, depth + 1)

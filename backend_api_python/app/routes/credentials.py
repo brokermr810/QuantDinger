@@ -1,7 +1,7 @@
 """
 Exchange credentials vault.
 
-encrypted_config stores Fernet ciphertext derived from SECRET_KEY (see app.utils.credential_crypto).
+encrypted_config stores Fernet ciphertext managed by app.utils.credential_crypto.
 """
 
 import traceback
@@ -78,6 +78,8 @@ def list_credentials():
         items = []
         for row in rows:
             item = dict(row or {})
+            if str(item.get('exchange_id') or '').strip().lower() not in {*CRYPTO_EXCHANGES, 'ibkr', 'alpaca'}:
+                continue
             item['enable_demo_trading'] = False
             try:
                 plain = decrypt_credential_blob(item.get('encrypted_config'))
@@ -307,58 +309,6 @@ def delete_credential():
         logger.error(f"delete_credential failed: {str(e)}")
         logger.error(traceback.format_exc())
         return jsonify({'code': 0, 'msg': str(e), 'data': None}), 500
-
-
-@credentials_blp.route('/get', methods=['GET'])
-@login_required
-def get_credential():
-    """
-    Return decrypted credential for form auto-fill.
-    """
-    try:
-        user_id = g.user_id
-        cred_id = request.args.get('id', type=int)
-        if not cred_id:
-            return jsonify({'code': 0, 'msg': 'Missing id', 'data': None}), 400
-
-        with get_db_connection() as db:
-            cur = db.cursor()
-            cur.execute(
-                """
-                SELECT id, user_id, name, exchange_id, encrypted_config, api_key_hint, created_at, updated_at
-                FROM qd_exchange_credentials
-                WHERE id = %s AND user_id = %s
-                """,
-                (cred_id, user_id)
-            )
-            row = cur.fetchone()
-            cur.close()
-
-        if not row:
-            return jsonify({'code': 0, 'msg': 'Not found', 'data': None}), 404
-
-        raw = row.get('encrypted_config')
-        plain = decrypt_credential_blob(raw)
-        decrypted = json.loads(plain) if plain else {}
-        # Ensure exchange_id is present
-        decrypted['exchange_id'] = row.get('exchange_id') or decrypted.get('exchange_id')
-
-        return jsonify({
-            'code': 1,
-            'msg': 'success',
-            'data': {
-                'id': row.get('id'),
-                'name': row.get('name'),
-                'exchange_id': row.get('exchange_id'),
-                'api_key_hint': row.get('api_key_hint'),
-                'config': decrypted
-            }
-        })
-    except Exception as e:
-        logger.error(f"get_credential failed: {str(e)}")
-        logger.error(traceback.format_exc())
-        return jsonify({'code': 0, 'msg': str(e), 'data': None}), 500
-
 
 
 # openapi-compat: legacy import name

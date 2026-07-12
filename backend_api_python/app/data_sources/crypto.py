@@ -16,6 +16,7 @@ logger = get_logger(__name__)
 # Live-trading scoped instances: one CCXT client per (exchange, spot|swap).
 _SCOPED_INSTANCES: Dict[str, "CryptoDataSource"] = {}
 _INVALID_SYMBOL_UNTIL: Dict[str, float] = {}
+PUBLIC_KLINE_EXCHANGE_IDS = ("binance", "bitget", "bybit", "okx", "gate", "htx")
 
 
 def _invalid_symbol_ttl_sec() -> float:
@@ -39,13 +40,16 @@ def _is_symbol_not_found_error(exc: Any) -> bool:
 def resolve_ccxt_for_live_trading(exchange_id: str, market_type: str) -> Tuple[str, Dict[str, Any]]:
     """Map QuantDinger exchange_id + market_type to a CCXT class id and options.
 
-    Used for **public** OHLCV/ticker only (no API keys). Keeps chart/backtest on
-    ``CCXTConfig.DEFAULT_EXCHANGE`` while running crypto strategies (signal/live)
-    use the same venue as the strategy's configured exchange.
+    Used for public OHLCV/ticker only (no API keys). Chart, backtest, signals,
+    and live strategies can therefore resolve the same venue and product type.
     """
     e = (exchange_id or "").strip().lower()
     if not e:
         e = (CCXTConfig.DEFAULT_EXCHANGE or "binance").strip().lower()
+    if e == "huobi":
+        e = "htx"
+    if e not in PUBLIC_KLINE_EXCHANGE_IDS:
+        raise ValueError(f"Unsupported crypto exchange: {e}")
     mt = (market_type or "spot").strip().lower()
     if mt in ("futures", "future", "perp", "perpetual"):
         mt = "swap"
@@ -63,13 +67,9 @@ def resolve_ccxt_for_live_trading(exchange_id: str, market_type: str) -> Tuple[s
         opts["defaultType"] = "swap" if mt == "swap" else "spot"
     elif e == "gate":
         opts["defaultType"] = "swap" if mt == "swap" else "spot"
-    elif e == "kraken":
-        ccxt_id = "krakenfutures" if mt == "swap" else "kraken"
     elif e == "htx" or e == "huobi":
         ccxt_id = "htx"
         opts["defaultType"] = "swap" if mt == "swap" else "spot"
-    elif e == "coinbase":
-        ccxt_id = "coinbase"
     # unknown id: pass through and let ccxt raise if unsupported
 
     return ccxt_id, opts
@@ -96,6 +96,10 @@ def resolve_crypto_venue(
     ex = str(ex).strip().lower()
     if not ex:
         ex = (CCXTConfig.DEFAULT_EXCHANGE or "binance").strip().lower()
+    if ex == "huobi":
+        ex = "htx"
+    if ex not in PUBLIC_KLINE_EXCHANGE_IDS:
+        ex = "binance"
 
     mt = str(market_type or tc.get("market_type") or "spot").strip().lower()
     if mt in ("futures", "future", "perp", "perpetual"):
@@ -120,12 +124,20 @@ class CryptoDataSource(BaseDataSource):
 
     _SINGLE_FETCH_HARD_CAP = 300
 
+    _RECENT_CANDLE_LIMITS: Dict[str, int] = {
+        "gate": 10000,
+    }
+
     COMMON_QUOTES = ['USDT', 'USD', 'BTC', 'ETH', 'BUSD', 'USDC', 'BNB', 'EUR', 'GBP']
     
     def __init__(self):
         self._scoped_exchange_id = ""
         self._scoped_market_type = "spot"
         default_ex = (CCXTConfig.DEFAULT_EXCHANGE or "binance").strip().lower()
+        if default_ex == "huobi":
+            default_ex = "htx"
+        if default_ex not in PUBLIC_KLINE_EXCHANGE_IDS:
+            default_ex = "binance"
         self._init_ccxt_exchange(default_ex, {})
 
     @classmethod
@@ -165,8 +177,7 @@ class CryptoDataSource(BaseDataSource):
 
         exchange_id = (ccxt_exchange_id or "").strip().lower()
         if not hasattr(ccxt, exchange_id):
-            logger.warning("CCXT exchange '%s' not found, falling back to 'binance'", exchange_id)
-            exchange_id = "binance"
+            raise ValueError(f"Unsupported CCXT exchange: {exchange_id}")
 
         exchange_class = getattr(ccxt, exchange_id)
         self.exchange = exchange_class(config)
@@ -310,14 +321,6 @@ class CryptoDataSource(BaseDataSource):
             return symbol
         
         exchange_id = getattr(self.exchange, 'id', '').lower()
-        
-        if exchange_id == 'coinbase':
-            if normalized.endswith('/USDT'):
-                usd_version = normalized.replace('/USDT', '/USD')
-                if self._ensure_markets_loaded():
-                    markets = self._markets_cache or {}
-                    if usd_version in markets:
-                        return usd_version
         
         if self._ensure_markets_loaded():
             valid_symbol = self._find_valid_symbol(base, normalized.split('/')[1] if '/' in normalized else 'USDT')
@@ -572,6 +575,26 @@ class CryptoDataSource(BaseDataSource):
                     since = max(0, now_ms - timeframe_ms)
                 end_ms = safe_before_ts * 1000
 
+                exchange_id = str(getattr(self.exchange, "id", "") or "").strip().lower()
+                recent_limit = int(self._RECENT_CANDLE_LIMITS.get(exchange_id, 0) or 0)
+                if recent_limit > 0:
+                    earliest_supported_ms = max(0, now_ms - timeframe_ms * (recent_limit - 1))
+                    if end_ms < earliest_supported_ms:
+                        logger.info(
+                            "Skipped %s %s history because the requested end precedes the exchange recent-candle window",
+                            exchange_id,
+                            ccxt_timeframe,
+                        )
+                        return []
+                    if since < earliest_supported_ms:
+                        logger.info(
+                            "Clamped %s %s history start to the exchange recent-candle limit (%s bars)",
+                            exchange_id,
+                            ccxt_timeframe,
+                            recent_limit,
+                        )
+                        since = earliest_supported_ms
+
                 all_ohlcv: List[List[Any]] = []
                 batch_limit = 300  # Coinbase limit is often 300, safer than 1000
                 current_since = since
@@ -651,6 +674,10 @@ class CryptoDataSource(BaseDataSource):
 
                 by_ts = {int(row[0]): row for row in all_ohlcv if row and len(row) >= 6}
                 ohlcv = sorted(by_ts.values(), key=lambda r: r[0])
+                if not ohlcv:
+                    return self._fetch_ohlcv_fallback(
+                        symbol_pair, ccxt_timeframe, limit, before_time, timeframe, after_time
+                    )
             else:
                 # No window specified: ask for at most the exchange's per-call cap.
                 # Passing the raw `limit` here can be tens of thousands for long
@@ -666,6 +693,17 @@ class CryptoDataSource(BaseDataSource):
             if _is_symbol_not_found_error(e):
                 self._mark_invalid_symbol(symbol_pair, e)
                 return []
+            partial_rows = locals().get("all_ohlcv") or []
+            if partial_rows:
+                logger.warning(
+                    "CCXT paginated fetch stopped early for %s %s; returning %s available candles: %s",
+                    symbol_pair,
+                    ccxt_timeframe,
+                    len(partial_rows),
+                    str(e),
+                )
+                by_ts = {int(row[0]): row for row in partial_rows if row and len(row) >= 6}
+                return sorted(by_ts.values(), key=lambda row: row[0])
             logger.warning(f"CCXT fetch_ohlcv failed: {str(e)}; trying fallback")
             return self._fetch_ohlcv_fallback(
                 symbol_pair, ccxt_timeframe, limit, before_time, timeframe, after_time
@@ -708,11 +746,32 @@ class CryptoDataSource(BaseDataSource):
             # page of data, which downstream callers can then handle gracefully.
             safe_limit = min(int(limit), self._SINGLE_FETCH_HARD_CAP)
             ohlcv = self.exchange.fetch_ohlcv(symbol_pair, ccxt_timeframe, since=since, limit=safe_limit)
-            return ohlcv
+            if ohlcv:
+                return ohlcv
+        except Exception as e:
+            if _is_symbol_not_found_error(e):
+                self._mark_invalid_symbol(symbol_pair, e)
+                return []
+            logger.warning("Requested-window fallback failed for %s: %s", symbol_pair, str(e))
+
+        try:
+            recent = self.exchange.fetch_ohlcv(
+                symbol_pair,
+                ccxt_timeframe,
+                limit=min(int(limit), self._SINGLE_FETCH_HARD_CAP),
+            )
+            if recent:
+                logger.warning(
+                    "Using the most recent %s candles for %s %s because the requested history window is unavailable",
+                    len(recent),
+                    symbol_pair,
+                    ccxt_timeframe,
+                )
+                return recent
         except Exception as e:
             if _is_symbol_not_found_error(e):
                 self._mark_invalid_symbol(symbol_pair, e)
             else:
-                logger.error(f"CCXT fallback method also failed: {str(e)}")
-            return []
+                logger.error("Recent-candle fallback also failed for %s: %s", symbol_pair, str(e))
+        return []
 

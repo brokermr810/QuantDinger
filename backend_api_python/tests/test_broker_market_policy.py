@@ -46,7 +46,7 @@ class TestHelpers:
 
     def test_is_compatible_credential_known(self):
         assert is_compatible_credential("ibkr", "USStock") is True
-        assert is_compatible_credential("alpaca", "Crypto") is True
+        assert is_compatible_credential("alpaca", "Crypto") is False
         assert is_compatible_credential("alpaca", "USStock") is True
         assert is_compatible_credential("binance", "Crypto") is True
 
@@ -66,9 +66,7 @@ class TestHelpers:
         assert allowed_market_types("bybit", "Crypto") == {"spot", "swap"}
 
     def test_allowed_market_types_spot_only(self):
-        # Coinbase Exchange institutional + Alpaca crypto + IBKR are spot-only.
-        assert allowed_market_types("coinbaseexchange", "Crypto") == {"spot"}
-        assert allowed_market_types("alpaca", "Crypto") == {"spot"}
+        # Traditional stock brokers remain spot-only for US equities.
         assert allowed_market_types("alpaca", "USStock") == {"spot"}
         assert allowed_market_types("ibkr", "USStock") == {"spot"}
 
@@ -107,12 +105,9 @@ class TestValidateLegalCombos:
         ("okx", "Crypto", "swap", "short"),
         ("bybit", "Crypto", "spot", "long"),
         ("bitget", "Crypto", "swap", "both"),
-        # Crypto spot-only exchanges
-        ("coinbaseexchange", "Crypto", "spot", "long"),
-        ("kraken", "Crypto", "spot", "long"),
-        # Alpaca dual desk
         ("alpaca", "USStock", "spot", "long"),
-        ("alpaca", "Crypto", "spot", "long"),
+        ("gate", "Crypto", "swap", "short"),
+        ("htx", "Crypto", "spot", "long"),
         # IBKR US stocks
         ("ibkr", "USStock", "spot", "long"),
     ])
@@ -208,8 +203,7 @@ class TestValidateIllegalCombos:
                 market_type="spot",
             )
 
-    def test_alpaca_crypto_swap_has_helpful_error(self):
-        # The most common confusion - error must explain why and how to fix.
+    def test_alpaca_crypto_is_rejected(self):
         with pytest.raises(ValueError) as excinfo:
             validate_strategy_config(
                 exchange_id="alpaca",
@@ -218,11 +212,10 @@ class TestValidateIllegalCombos:
                 trade_direction="long",
             )
         msg = str(excinfo.value)
-        assert "Alpaca crypto desk is spot-only" in msg
-        assert "Binance/OKX/Bybit" in msg
+        assert "cannot trade market_category='Crypto'" in msg
 
-    def test_coinbase_crypto_swap_rejected(self):
-        with pytest.raises(ValueError, match="does not support market_type='swap'"):
+    def test_removed_crypto_exchange_rejected(self):
+        with pytest.raises(ValueError, match="Unknown exchange_id"):
             validate_strategy_config(
                 exchange_id="coinbaseexchange",
                 market_category="Crypto",
@@ -347,7 +340,7 @@ class TestToDictSnapshot:
         # JSON-serializable: every leaf must be a list, not a set.
         assert isinstance(bm["binance"]["Crypto"], list)
         assert bm["binance"]["Crypto"] == ["spot", "swap"]
-        assert bm["alpaca"]["Crypto"] == ["spot"]
+        assert bm["alpaca"] == {"USStock": ["spot"]}
 
     def test_long_only_brokers_serialized(self):
         assert sorted(to_dict()["long_only_brokers"]) == ["alpaca", "ibkr"]
@@ -388,5 +381,5 @@ class TestPolicyEndpoint:
         assert "long_only_brokers" in data
         assert "bot_type_markets" in data
         assert data["broker_markets"]["binance"]["Crypto"] == ["spot", "swap"]
-        assert data["broker_markets"]["alpaca"]["Crypto"] == ["spot"]
+        assert data["broker_markets"]["alpaca"] == {"USStock": ["spot"]}
         assert "alpaca" in data["long_only_brokers"]

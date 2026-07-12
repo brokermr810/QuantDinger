@@ -196,6 +196,11 @@ def run_startup_hooks(app: Flask) -> None:
         start_pending_order_worker()
         start_grid_fill_poller()
         start_portfolio_monitor()
+        try:
+            from app.services.portfolio_deployment import start_portfolio_deployment_scheduler
+            start_portfolio_deployment_scheduler()
+        except Exception:
+            logger.error("Failed to start portfolio deployment scheduler", exc_info=True)
         start_usdt_order_worker()
         try:
             from app.services.ai_calibration import start_ai_calibration_worker
@@ -207,4 +212,14 @@ def run_startup_hooks(app: Flask) -> None:
             start_reflection_worker()
         except Exception:
             pass
+        try:
+            from app.services.indicator_signal_alerts import start_indicator_signal_alert_worker
+            start_indicator_signal_alert_worker()
+        except Exception:
+            logger.error("Failed to start indicator signal alert worker", exc_info=True)
+        try:
+            from app.services.market_catalog_sync import start_market_catalog_sync_on_boot
+            start_market_catalog_sync_on_boot()
+        except Exception:
+            logger.error("Failed to start automatic market catalog sync", exc_info=True)
         restore_running_strategies()

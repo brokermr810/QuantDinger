@@ -2,7 +2,7 @@
 Factory for direct exchange clients.
 
 Supports:
-- Crypto exchanges: Binance, OKX, Bitget, Bybit, Coinbase, Kraken, Gate, HTX
+- Crypto exchanges: Binance, OKX, Bitget, Bybit, Gate, HTX
 - Traditional brokers: Interactive Brokers (IBKR) and Alpaca
 """
 
@@ -21,9 +21,6 @@ from app.services.live_trading.okx import OkxClient
 from app.services.live_trading.bitget import BitgetMixClient
 from app.services.live_trading.bitget_spot import BitgetSpotClient
 from app.services.live_trading.bybit import BybitClient
-from app.services.live_trading.coinbase_exchange import CoinbaseExchangeClient
-from app.services.live_trading.kraken import KrakenClient
-from app.services.live_trading.kraken_futures import KrakenFuturesClient
 from app.services.live_trading.gate import GateSpotClient, GateUsdtFuturesClient
 from app.services.live_trading.htx import HtxClient
 
@@ -211,22 +208,6 @@ def create_client(exchange_config: Dict[str, Any], *, market_type: str = "swap")
             hedge_mode=hedge_mode,
         )
 
-    if exchange_id in ("coinbaseexchange", "coinbase_exchange"):
-        default_cb = "https://api-public.sandbox.exchange.coinbase.com" if is_demo else "https://api.exchange.coinbase.com"
-        base_url = _get(exchange_config, "base_url", "baseUrl") or default_cb
-        if mt != "spot":
-            raise LiveTradingError("CoinbaseExchange only supports spot market_type in this project")
-        return CoinbaseExchangeClient(api_key=api_key, secret_key=secret_key, passphrase=passphrase, base_url=base_url)
-
-    if exchange_id == "kraken":
-        base_url = _get(exchange_config, "base_url", "baseUrl") or "https://api.kraken.com"
-        if mt == "spot":
-            # Kraken spot REST has no separate public sandbox URL; use demo keys on production API if offered by Kraken.
-            return KrakenClient(api_key=api_key, secret_key=secret_key, base_url=base_url)
-        fut_default = "https://demo-futures.kraken.com" if is_demo else "https://futures.kraken.com"
-        fut_url = _get(exchange_config, "futures_base_url", "futuresBaseUrl") or fut_default
-        return KrakenFuturesClient(api_key=api_key, secret_key=secret_key, base_url=fut_url)
-
     if exchange_id == "gate":
         gate_channel_id = _get(exchange_config, "gate_channel_id", "gateChannelId") or "dinger"
         if mt == "spot":
@@ -272,7 +253,7 @@ def create_ibkr_client(exchange_config: Dict[str, Any]):
 
     exchange_config should contain:
     - ibkr_host: TWS/Gateway host (default: 127.0.0.1)
-    - ibkr_port: TWS/Gateway port (default: 7497 = TWS Paper; TWS Live default is 7496)
+    - ibkr_port: TWS/Gateway port (default 7497 = TWS Paper per IB; Live TWS default 7496)
     - ibkr_client_id: Client ID (see below — must not collide with /api/ibkr UI)
     - ibkr_account: Account ID (optional, auto-select if empty)
 

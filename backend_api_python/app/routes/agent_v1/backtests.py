@@ -1,13 +1,14 @@
-"""Async backtest endpoints (class B).
+﻿"""Async V2 backtest endpoints (class B).
 
-Submit returns a job_id; the agent polls /jobs/{id} until done.  We delegate
-to the existing BacktestService so results match the human UI exactly.
+Submit returns a job_id; the agent polls /jobs/{id} until done. This endpoint
+uses the same V2 execution model as the human Backtest Center.
 """
 from __future__ import annotations
 
 from typing import Any
 
-from app.services.backtest import BacktestService
+from app.services.unified_backtest import UnifiedBacktestService
+from app.services.strategy_warmup import resolve_startup_candle_count
 from app.services.backtest_limits import validate_backtest_range
 from app.utils.agent_auth import (
     SCOPE_B, agent_required, current_token, current_user_id,
@@ -22,7 +23,7 @@ from ._helpers import envelope, error, get_json_or_400
 from ._security import assert_indicator_code_size
 
 logger = get_logger(__name__)
-_backtest = BacktestService()
+_backtest = UnifiedBacktestService()
 
 
 def _parse_date(s: Any) -> Any:
@@ -41,16 +42,17 @@ def _parse_date(s: Any) -> Any:
 
 
 def _run_backtest(payload: dict) -> Any:
-    """Adapter: call BacktestService.run_aligned with the agent payload shape."""
+    """Adapter: call ScriptStrategy backtest with the agent payload shape."""
     from app.services.backtest_execution import (
+        default_commission_if_missing,
         default_slippage_if_missing,
         merge_strict_mode_into_strategy_config,
         parse_strict_mode,
     )
 
-    code = (payload.get("code") or payload.get("indicator_code") or "").strip()
+    code = (payload.get("code") or payload.get("strategy_code") or payload.get("scriptCode") or "").strip()
     if not code:
-        raise ValueError("code (indicator code) is required")
+        raise ValueError("code (ScriptStrategy code) is required")
 
     market = payload.get("market") or "Crypto"
     symbol = payload.get("symbol")
@@ -77,8 +79,8 @@ def _run_backtest(payload: dict) -> Any:
         payload.get("strategy_config") or payload.get("strategyConfig") or {},
         strict_mode,
     )
-    indicator_params = payload.get("indicator_params") or payload.get("params") or {}
-    warmup_bars = _backtest._estimate_warmup_bars(code, indicator_params)
+    script_params = payload.get("script_params") or payload.get("params") or {}
+    warmup_bars = resolve_startup_candle_count(code, script_params)
     range_error = validate_backtest_range(
         market=market,
         symbol=symbol,
@@ -90,28 +92,45 @@ def _run_backtest(payload: dict) -> Any:
     if range_error:
         raise ValueError(range_error["msg"])
 
-    return _backtest.run_aligned(
-        strict_mode=strict_mode,
-        indicator_code=code,
-        market=market,
-        symbol=symbol,
-        timeframe=timeframe,
+    initial_capital = float(payload.get("initial_capital") or payload.get("initialCapital") or 10000)
+    commission = default_commission_if_missing(payload.get("commission"))
+    slippage = default_slippage_if_missing(payload.get("slippage"))
+    leverage = int(payload.get("leverage") or 1)
+    trade_direction = payload.get("trade_direction") or payload.get("tradeDirection") or "long"
+    strategy_config = {
+        **(strategy_config if isinstance(strategy_config, dict) else {}),
+        "script_params": script_params if isinstance(script_params, dict) else {},
+        "market_type": market_type or None,
+    }
+    snapshot = {
+        "strategy_id": payload.get("strategy_id") or payload.get("strategyId"),
+        "strategy_name": payload.get("strategy_name") or payload.get("strategyName") or "Agent ScriptStrategy",
+        "strategy_type": "ScriptStrategy",
+        "strategy_mode": payload.get("strategy_mode") or payload.get("strategyMode") or "script",
+        "run_type": "strategy_script",
+        "market": market,
+        "symbol": symbol,
+        "timeframe": timeframe,
+        "market_type": market_type or None,
+        "exchange_id": exchange_id or None,
+        "initial_capital": initial_capital,
+        "commission": commission,
+        "slippage": slippage,
+        "leverage": leverage,
+        "trade_direction": trade_direction,
+        "strict_mode": strict_mode,
+        "code": code,
+        "strategy_config": strategy_config,
+        "user_id": int(payload.get("__user_id") or 1),
+    }
+    return _backtest.run_strategy_snapshot(
+        snapshot,
         start_date=start_date,
         end_date=end_date.replace(hour=23, minute=59, second=59),
-        initial_capital=float(payload.get("initial_capital") or payload.get("initialCapital") or 10000),
-        commission=float(payload.get("commission") or 0.001),
-        slippage=default_slippage_if_missing(payload.get("slippage")),
-        leverage=int(payload.get("leverage") or 1),
-        trade_direction=payload.get("trade_direction") or payload.get("tradeDirection") or "long",
-        strategy_config=strategy_config,
-        indicator_params=indicator_params,
-        user_id=int(payload.get("__user_id") or 1),
-        market_type=market_type or None,
-        exchange_id=exchange_id or None,
     )
 
 
-@agent_v1_bp.route("/backtests", methods=["POST"])
+@agent_v1_bp.route("/backtest/run", methods=["POST"])
 @agent_required(SCOPE_B)
 def create_backtest():
     """Submit a backtest job. Returns 202 with `job_id` for polling."""
@@ -121,7 +140,9 @@ def create_backtest():
 
     market = body.get("market") or "Crypto"
     symbol = body.get("symbol")
-    code = (body.get("code") or body.get("indicator_code") or "").strip()
+    if body.get("indicator_code"):
+        return error(400, "Indicators are chart-only. Submit ScriptStrategy code in `code`.", http=400)
+    code = (body.get("code") or body.get("strategy_code") or body.get("scriptCode") or "").strip()
     if code:
         try:
             assert_indicator_code_size(code)
