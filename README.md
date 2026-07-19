@@ -1,5 +1,5 @@
 <div align="center">
-  <a href="https://github.com/brokermr810/QuantDinger">
+  <a href="https://github.com/OpenByteInc/QuantDinger">
     <img src="docs/screenshots/logo.jpg" alt="QuantDinger logo" width="180" height="180">
   </a>
 
@@ -42,7 +42,7 @@
     <img src="https://img.shields.io/badge/PostgreSQL-18-4169E1?style=flat-square&logo=postgresql&logoColor=white" alt="PostgreSQL 18">
     <img src="https://img.shields.io/badge/Redis-8-DC382D?style=flat-square&logo=redis&logoColor=white" alt="Redis 8">
     <img src="https://img.shields.io/badge/Docker-Compose-2496ED?style=flat-square&logo=docker&logoColor=white" alt="Docker Compose">
-    <img src="https://img.shields.io/github/v/release/brokermr810/QuantDinger?style=flat-square&label=Release" alt="Latest release">
+    <img src="https://img.shields.io/github/v/release/OpenByteInc/QuantDinger?style=flat-square&label=Release" alt="Latest release">
   </p>
 </div>
 
@@ -159,13 +159,13 @@ not required.
 Linux or macOS:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/brokermr810/QuantDinger/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/OpenByteInc/QuantDinger/main/install.sh | bash
 ```
 
 Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/brokermr810/QuantDinger/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/OpenByteInc/QuantDinger/main/install.ps1 | iex
 ```
 
 The installer asks for the initial administrator credentials, generates the
@@ -220,7 +220,7 @@ legacy-image recovery and rootless/NFS notes.
 ### Option B: source checkout
 
 ```bash
-git clone https://github.com/brokermr810/QuantDinger.git
+git clone https://github.com/OpenByteInc/QuantDinger.git
 cd QuantDinger
 cp backend_api_python/env.example backend_api_python/.env
 cp .env.example .env
@@ -549,10 +549,10 @@ and **Broker Accounts → Open account**.
 - QuantDinger is a product of **Open Byte Inc**. The name, logo, product
   identity, and commercial licensing are managed separately from the code license.
 - Web frontend source is published in
-  [QuantDinger Frontend](https://github.com/brokermr810/QuantDinger-Vue) under
+  [QuantDinger Frontend](https://github.com/OpenByteInc/QuantDinger-Vue) under
   its own source-available license.
 - Mobile H5 and native client source is published in
-  [QuantDinger Mobile](https://github.com/brokermr810/QuantDinger-Mobile) under
+  [QuantDinger Mobile](https://github.com/OpenByteInc/QuantDinger-Mobile) under
   its own source-available license.
 - Trademark, branding, attribution, and watermark use is governed by
   [TRADEMARKS.md](TRADEMARKS.md). Apache 2.0 does not grant trademark rights.
@@ -598,7 +598,7 @@ arising from use or misuse of the software.
 - [Website](https://www.quantdinger.com)
 - [Contributing guide](CONTRIBUTING.md)
 - [Contributors](CONTRIBUTORS.md)
-- [Report bugs or request features](https://github.com/brokermr810/QuantDinger/issues)
+- [Report bugs or request features](https://github.com/OpenByteInc/QuantDinger/issues)
 - Email: [support@quantdinger.com](mailto:support@quantdinger.com)
 
 ## Sponsors

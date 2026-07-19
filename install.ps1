@@ -1,7 +1,7 @@
 # QuantDinger interactive installer for Windows PowerShell.
 #
 # Usage:
-#   irm https://raw.githubusercontent.com/brokermr810/QuantDinger/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/OpenByteInc/QuantDinger/main/install.ps1 | iex
 #
 # Optional environment overrides:
 #   $env:QUANTDINGER_INSTALL_REF = "main"
@@ -12,7 +12,7 @@ $ProgressPreference = "SilentlyContinue"
 
 $InstallDir = if ($env:QUANTDINGER_INSTALL_DIR) { $env:QUANTDINGER_INSTALL_DIR } else { Join-Path $HOME "quantdinger" }
 $InstallRef = if ($env:QUANTDINGER_INSTALL_REF) { $env:QUANTDINGER_INSTALL_REF } else { "main" }
-$GithubRaw = "https://raw.githubusercontent.com/brokermr810/QuantDinger/$InstallRef"
+$GithubRaw = "https://raw.githubusercontent.com/OpenByteInc/QuantDinger/$InstallRef"
 $ComposeFile = "docker-compose.yml"
 $BackendEnv = "backend.env"
 $RootEnv = ".env"

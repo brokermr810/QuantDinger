@@ -3,10 +3,10 @@
 # QuantDinger interactive installer for Linux and macOS.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/brokermr810/QuantDinger/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/OpenByteInc/QuantDinger/main/install.sh | bash
 #
 # Custom install directory:
-#   curl -fsSL https://raw.githubusercontent.com/brokermr810/QuantDinger/main/install.sh | bash -s -- /opt/quantdinger
+#   curl -fsSL https://raw.githubusercontent.com/OpenByteInc/QuantDinger/main/install.sh | bash -s -- /opt/quantdinger
 #
 # Optional environment overrides:
 #   QUANTDINGER_INSTALL_REF=main
@@ -33,7 +33,7 @@ fi
 
 INSTALL_DIR="${1:-${QUANTDINGER_INSTALL_DIR:-$HOME/quantdinger}}"
 INSTALL_REF="${QUANTDINGER_INSTALL_REF:-main}"
-GITHUB_RAW="https://raw.githubusercontent.com/brokermr810/QuantDinger/${INSTALL_REF}"
+GITHUB_RAW="https://raw.githubusercontent.com/OpenByteInc/QuantDinger/${INSTALL_REF}"
 COMPOSE_FILE="docker-compose.yml"
 BACKEND_ENV="backend.env"
 ROOT_ENV=".env"

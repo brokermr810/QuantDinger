@@ -161,7 +161,7 @@ CONFIG_SCHEMA = {
                 'key': 'BRAND_CONTACT_FEATURE_REQUEST_URL',
                 'label': 'Feature Request URL',
                 'type': 'text',
-                'default': 'https://github.com/brokermr810/QuantDinger/issues',
+                'default': 'https://github.com/OpenByteInc/QuantDinger/issues',
                 'description': 'Where to send users who want to file an issue or feature request.'
             },
         ]

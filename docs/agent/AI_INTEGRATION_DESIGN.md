@@ -1,11 +1,11 @@
-﻿# QuantDinger — AI / Agent Integration (Design)
+# QuantDinger — AI / Agent Integration (Design)
 
 | Item | Value |
 |------|--------|
 | Status | Draft (for review and phased rollout) |
 | Audience | Maintainers; integrators wiring external AI agents into QuantDinger |
 | Depends on | [AGENT_ENVIRONMENT_DESIGN.md](AGENT_ENVIRONMENT_DESIGN.md) — three-layer contracts |
-| Repository | [QuantDinger](https://github.com/brokermr810/QuantDinger) |
+| Repository | [QuantDinger](https://github.com/OpenByteInc/QuantDinger) |
 
 > Companion to the multi-agent runtime design. That doc explains how *coding* agents work **inside the repo**. **This doc** explains how external and embedded **AI agents** consume QuantDinger as a **product** — research, strategy, backtest, and (carefully) execution.
 

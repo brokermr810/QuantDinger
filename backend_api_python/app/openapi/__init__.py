@@ -48,7 +48,7 @@ def init_openapi(app: Flask) -> Api:
                 "description": app.config.get("OPENAPI_DESCRIPTION", ""),
                 "contact": {
                     "name": "QuantDinger",
-                    "url": "https://github.com/brokermr810/quantdinger",
+                    "url": "https://github.com/OpenByteInc/quantdinger",
                 },
                 "license": {
                     "name": "See repository LICENSE",

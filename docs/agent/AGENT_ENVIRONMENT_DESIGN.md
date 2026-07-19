@@ -4,7 +4,7 @@
 |------|--------|
 | Status | Draft (for review and phased rollout) |
 | Audience | Maintainers and developers using Cursor, Claude Code, Codex, or similar coding agents |
-| Repository | [QuantDinger](https://github.com/brokermr810/QuantDinger) — self-hosted quant stack: research, strategies, backtests, live trading |
+| Repository | [QuantDinger](https://github.com/OpenByteInc/QuantDinger) — self-hosted quant stack: research, strategies, backtests, live trading |
 
 ---
 

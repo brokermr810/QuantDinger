@@ -62,8 +62,8 @@ Use this mode for normal cloud deployment. It pulls backend, web frontend, and m
 ```bash
 mkdir -p ~/quantdinger
 cd ~/quantdinger
-curl -O https://raw.githubusercontent.com/brokermr810/QuantDinger/main/docker-compose.ghcr.yml
-curl -o backend.env https://raw.githubusercontent.com/brokermr810/QuantDinger/main/backend_api_python/env.example
+curl -O https://raw.githubusercontent.com/OpenByteInc/QuantDinger/main/docker-compose.ghcr.yml
+curl -o backend.env https://raw.githubusercontent.com/OpenByteInc/QuantDinger/main/backend_api_python/env.example
 ```
 
 Edit `backend.env` before first start:
@@ -106,7 +106,7 @@ docker compose -f docker-compose.ghcr.yml ps
 Use this mode only when you need to build the backend from local source.
 
 ```bash
-git clone https://github.com/brokermr810/QuantDinger.git
+git clone https://github.com/OpenByteInc/QuantDinger.git
 cd QuantDinger
 cp backend_api_python/env.example backend_api_python/.env
 ./scripts/generate-secret-key.sh

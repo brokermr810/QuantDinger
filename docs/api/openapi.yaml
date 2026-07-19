@@ -3,7 +3,7 @@ info:
     — see `docs/agent/agent-openapi.json`. Conventions: `docs/architecture/API_CONVENTIONS.md`.'
   contact:
     name: QuantDinger
-    url: https://github.com/brokermr810/quantdinger
+    url: https://github.com/OpenByteInc/quantdinger
   license:
     name: See repository LICENSE
   title: QuantDinger Web API

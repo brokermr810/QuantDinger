@@ -6,8 +6,8 @@
 #
 # Minimal install (Linux / macOS):
 #
-#   curl -O https://raw.githubusercontent.com/brokermr810/QuantDinger/main/docker-compose.ghcr.yml
-#   curl -o backend.env https://raw.githubusercontent.com/brokermr810/QuantDinger/main/backend_api_python/env.example
+#   curl -O https://raw.githubusercontent.com/OpenByteInc/QuantDinger/main/docker-compose.ghcr.yml
+#   curl -o backend.env https://raw.githubusercontent.com/OpenByteInc/QuantDinger/main/backend_api_python/env.example
 #   # Edit backend.env and set ADMIN_USER / ADMIN_PASSWORD before first start.
 #   docker compose -f docker-compose.ghcr.yml up -d
 #   # open http://localhost:8888  (web) or http://localhost:8889 (mobile H5)

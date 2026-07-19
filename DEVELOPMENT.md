@@ -113,7 +113,7 @@ For iterating on Vue source (theme tweaks, debugging, customised UI), drop the s
 #     docker-compose.yml
 #     docker-compose.build.yml        <- enables local frontend build
 
-git clone https://github.com/brokermr810/QuantDinger-Vue.git QuantDinger-Vue
+git clone https://github.com/OpenByteInc/QuantDinger-Vue.git QuantDinger-Vue
 
 # Build frontend from ./QuantDinger-Vue, pull everything else:
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build

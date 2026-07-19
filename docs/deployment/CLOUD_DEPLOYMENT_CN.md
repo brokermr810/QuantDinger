@@ -62,8 +62,8 @@ docker compose version
 ```bash
 mkdir -p ~/quantdinger
 cd ~/quantdinger
-curl -O https://raw.githubusercontent.com/brokermr810/QuantDinger/main/docker-compose.ghcr.yml
-curl -o backend.env https://raw.githubusercontent.com/brokermr810/QuantDinger/main/backend_api_python/env.example
+curl -O https://raw.githubusercontent.com/OpenByteInc/QuantDinger/main/docker-compose.ghcr.yml
+curl -o backend.env https://raw.githubusercontent.com/OpenByteInc/QuantDinger/main/backend_api_python/env.example
 ```
 
 首次启动前编辑 `backend.env`：
@@ -106,7 +106,7 @@ docker compose -f docker-compose.ghcr.yml ps
 只有需要在服务器上基于本地源码构建后端时，才建议使用这个模式。
 
 ```bash
-git clone https://github.com/brokermr810/QuantDinger.git
+git clone https://github.com/OpenByteInc/QuantDinger.git
 cd QuantDinger
 cp backend_api_python/env.example backend_api_python/.env
 ./scripts/generate-secret-key.sh
