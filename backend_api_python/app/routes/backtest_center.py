@@ -18,6 +18,7 @@ from app.services.backtest_execution import (
     default_slippage_if_missing,
     parse_rate,
 )
+from app.services.backtest_limits import BacktestRangeLimitError
 from app.services.script_source import get_script_source_service
 from app.services.strategy_v2 import (
     FactorResearchRepository,
@@ -113,6 +114,8 @@ def run_strategy_backtest():
         payload = request.get_json(silent=True) or {}
         run_id, result = _run(payload, int(g.user_id), persist=bool(payload.get("persist", True)))
         return jsonify({"code": 1, "msg": "success", "data": {**result, "runId": run_id}})
+    except BacktestRangeLimitError as exc:
+        return jsonify({"code": 0, "msg": str(exc), "data": exc.details}), 400
     except ValueError as exc:
         return jsonify({"code": 0, "msg": str(exc), "data": None}), 400
     except Exception as exc:
@@ -170,6 +173,8 @@ def run_factor_research():
             code=code,
         )
         return jsonify({"code": 1, "msg": "success", "data": {**result, "runId": run_id}})
+    except BacktestRangeLimitError as exc:
+        return jsonify({"code": 0, "msg": str(exc), "data": exc.details}), 400
     except ValueError as exc:
         return jsonify({"code": 0, "msg": str(exc), "data": None}), 400
     except Exception as exc:

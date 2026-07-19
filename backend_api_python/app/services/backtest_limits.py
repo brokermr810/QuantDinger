@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Dict, Optional
+import math
+from typing import Any, Dict, Iterable, Optional
 
 from app.data_sources.factory import DataSourceFactory
 
@@ -20,6 +21,16 @@ _TIMEFRAME_SECONDS = {
     "1D": 86400,
     "1W": 604800,
 }
+
+_TIMEFRAME_ALIASES = {key.lower(): key for key in _TIMEFRAME_SECONDS}
+
+
+class BacktestRangeLimitError(ValueError):
+    """Structured range rejection that routes can return to API clients."""
+
+    def __init__(self, details: Dict[str, Any]) -> None:
+        super().__init__("strategyV2.backtestRangeLimit")
+        self.details = details
 
 
 @dataclass(frozen=True)
@@ -74,14 +85,69 @@ _MARKET_LIMITS: Dict[str, Dict[str, BacktestRangePolicy]] = {
 }
 
 
+def normalize_backtest_timeframe(timeframe: str) -> str:
+    raw = str(timeframe or "1D").strip()
+    return _TIMEFRAME_ALIASES.get(raw.lower(), raw)
+
+
 def backtest_range_policy(market: str, timeframe: str) -> BacktestRangePolicy:
     normalized_market = DataSourceFactory.normalize_market(market or "")
-    tf = str(timeframe or "1D").strip()
+    tf = normalize_backtest_timeframe(timeframe)
     return (
         _MARKET_LIMITS.get(normalized_market, {}).get(tf)
         or _DEFAULT_LIMITS.get(tf)
         or _DEFAULT_LIMITS["1D"]
     )
+
+
+def backtest_warmup_calendar_days(timeframe: str, warmup_bars: int) -> int:
+    bars = max(0, int(warmup_bars or 0))
+    if bars == 0:
+        return 0
+    normalized = normalize_backtest_timeframe(timeframe).lower()
+    if normalized.endswith("m") and normalized[:-1].isdigit():
+        minutes = max(1, int(normalized[:-1]))
+        return max(1, math.ceil(bars * minutes * 1.5 / 1440.0))
+    if normalized.endswith("h") and normalized[:-1].isdigit():
+        hours = max(1, int(normalized[:-1]))
+        return max(1, math.ceil(bars * hours * 1.5 / 24.0))
+    if normalized.endswith("d"):
+        return max(2, math.ceil(bars * 7.0 / 5.0 * 1.35))
+    if normalized.endswith("w"):
+        return max(8, bars * 8)
+    return max(1, math.ceil(bars * 1.5))
+
+
+def backtest_range_policy_metadata(
+    *,
+    markets: Iterable[str],
+    timeframe: str,
+    warmup_bars: int = 0,
+) -> Dict[str, Any]:
+    """Return the strictest client-facing policy for a compiled strategy."""
+    normalized_markets = list(dict.fromkeys(
+        DataSourceFactory.normalize_market(market or "")
+        for market in markets
+    )) or [""]
+    policies = [
+        (market, backtest_range_policy(market, timeframe))
+        for market in normalized_markets
+    ]
+    market, policy = min(policies, key=lambda item: item[1].max_days)
+    normalized_timeframe = normalize_backtest_timeframe(timeframe)
+    timeframe_seconds = _TIMEFRAME_SECONDS.get(normalized_timeframe, 86400)
+    normalized_warmup_bars = max(0, int(warmup_bars or 0))
+    warmup_days = backtest_warmup_calendar_days(normalized_timeframe, normalized_warmup_bars)
+    return {
+        "timeframe": normalized_timeframe,
+        "market": market,
+        "maxDays": policy.max_days,
+        "maxSelectedDays": max(0, policy.max_days - warmup_days),
+        "warmupBars": normalized_warmup_bars,
+        "warmupDays": warmup_days,
+        "timeframeSeconds": timeframe_seconds,
+        "maxBars": max(1, (policy.max_days * 86400) // timeframe_seconds),
+    }
 
 
 def _date_limit_start(end_date: datetime, max_days: int, warmup_seconds: int) -> datetime:
@@ -102,12 +168,17 @@ def validate_backtest_range(
     start_date: datetime,
     end_date: datetime,
     warmup_bars: int = 0,
+    fetch_start: Optional[datetime] = None,
 ) -> Optional[Dict[str, Any]]:
     """Return a structured range error, or None when the request is allowed."""
     policy = backtest_range_policy(market, timeframe)
-    tf_seconds = _TIMEFRAME_SECONDS.get(str(timeframe or "1D").strip(), 86400)
+    normalized_timeframe = normalize_backtest_timeframe(timeframe)
+    tf_seconds = _TIMEFRAME_SECONDS.get(normalized_timeframe, 86400)
     warmup_seconds = max(0, int(warmup_bars or 0)) * tf_seconds
-    fetch_start = start_date - timedelta(seconds=warmup_seconds)
+    if fetch_start is None:
+        fetch_start = start_date - timedelta(seconds=warmup_seconds)
+    else:
+        warmup_seconds = max(0, int((start_date - fetch_start).total_seconds()))
     selected_days = max(0, (end_date - start_date).days)
     fetch_days = max(0, (end_date - fetch_start).days)
     if fetch_days <= policy.max_days:

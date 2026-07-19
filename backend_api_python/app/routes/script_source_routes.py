@@ -3,6 +3,7 @@
 from flask import g, jsonify, request
 
 from app.routes.strategy_blueprint import strategy_blp
+from app.services.backtest_limits import backtest_range_policy_metadata
 from app.services.script_source import get_script_source_service
 from app.services.strategy_v2 import (
     StrategyBacktestRepository,
@@ -158,8 +159,27 @@ def compile_script_source_v2():
             code = str((source or {}).get("code") or "").strip()
         if not code:
             return jsonify({"code": 0, "msg": "strategyV2.codeRequired", "data": None}), 400
-        manifest = compile_strategy_v2(code).manifest.metadata()
-        return jsonify({"code": 1, "msg": "success", "data": {"manifest": manifest}})
+        compiled_manifest = compile_strategy_v2(code).manifest
+        manifest = compiled_manifest.metadata()
+        range_policy = backtest_range_policy_metadata(
+            markets=compiled_manifest.markets,
+            timeframe=compiled_manifest.primary_frequency,
+            warmup_bars=compiled_manifest.warmup_bars,
+        )
+        factor_range_policy = backtest_range_policy_metadata(
+            markets=compiled_manifest.markets,
+            timeframe=compiled_manifest.primary_frequency,
+            warmup_bars=max(40, compiled_manifest.warmup_bars),
+        )
+        range_policy.update({
+            "factorMaxSelectedDays": factor_range_policy["maxSelectedDays"],
+            "factorWarmupBars": factor_range_policy["warmupBars"],
+        })
+        return jsonify({
+            "code": 1,
+            "msg": "success",
+            "data": {"manifest": manifest, "backtestRangePolicy": range_policy},
+        })
     except ValueError as exc:
         return jsonify({"code": 0, "msg": str(exc), "data": None}), 400
     except Exception as exc:

@@ -1,6 +1,13 @@
 ﻿from datetime import datetime
 
-from app.services.backtest_limits import validate_backtest_range
+import pytest
+
+from app.services.backtest_limits import (
+    BacktestRangeLimitError,
+    backtest_range_policy_metadata,
+    validate_backtest_range,
+)
+from app.services.strategy_v2.service import StrategyV2BacktestService
 
 
 def test_forex_intraday_range_error_includes_actionable_recommendation():
@@ -70,3 +77,52 @@ def test_warmup_larger_than_policy_has_no_fake_date_recommendation():
     assert err["recommended_start"] is None
     assert err["recommended_end"] is None
     assert "warmup alone exceeds" in err["msg"]
+
+
+def test_policy_metadata_uses_strictest_market_and_normalizes_timeframe():
+    policy = backtest_range_policy_metadata(
+        markets=["Crypto", "USStock"],
+        timeframe="1h",
+        warmup_bars=24,
+    )
+
+    assert policy["timeframe"] == "1H"
+    assert policy["market"] == "USStock"
+    assert policy["maxDays"] == 700
+    assert policy["warmupDays"] == 2
+    assert policy["maxSelectedDays"] == 698
+
+
+def test_service_rejects_one_year_of_one_minute_data_before_fetching():
+    code = '''
+def initialize(context):
+    context.set_universe(["Crypto:BTC/USDT"])
+    context.subscribe(frequency="1m")
+
+def handle_data(context, data):
+    pass
+'''
+
+    def unexpected_fetch(*_args, **_kwargs):
+        raise AssertionError("market data must not be fetched for an oversized request")
+
+    service = StrategyV2BacktestService(
+        repository=object(),
+        universe_service=object(),
+        frame_fetcher=unexpected_fetch,
+        snapshot_store=object(),
+    )
+
+    with pytest.raises(BacktestRangeLimitError) as caught:
+        service.run(
+            user_id=1,
+            code=code,
+            start_date=datetime(2025, 7, 19),
+            end_date=datetime(2026, 7, 19, 23, 59, 59),
+            initial_capital=10_000,
+            persist=False,
+        )
+
+    assert caught.value.details["error_type"] == "BACKTEST_RANGE_LIMIT"
+    assert caught.value.details["timeframe"] == "1m"
+    assert caught.value.details["max_days"] == 30

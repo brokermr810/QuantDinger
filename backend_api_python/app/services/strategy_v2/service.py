@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import math
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
@@ -11,6 +10,11 @@ from typing import Any, Callable
 
 import pandas as pd
 
+from app.services.backtest_limits import (
+    BacktestRangeLimitError,
+    backtest_warmup_calendar_days,
+    validate_backtest_range,
+)
 from app.services.fundamental_data import get_fundamental_data_service
 from app.services.universe import UniverseService, get_universe_service
 
@@ -76,7 +80,16 @@ class StrategyV2BacktestService:
                 f"strategyV2.factorResearchUniverseTooSmall:{minimum_symbols}"
             )
         frequency = manifest.primary_frequency
-        fetch_start = start_date - timedelta(days=_warmup_calendar_days(frequency, max(40, manifest.warmup_bars)))
+        warmup_bars = max(40, manifest.warmup_bars)
+        fetch_start = start_date - timedelta(days=backtest_warmup_calendar_days(frequency, warmup_bars))
+        _enforce_backtest_range(
+            candidates=candidates,
+            timeframe=frequency,
+            start_date=start_date,
+            end_date=end_date,
+            warmup_bars=warmup_bars,
+            fetch_start=fetch_start,
+        )
         frames, skipped = self.fetch_frames(candidates, frequency, fetch_start, end_date)
         if not frames:
             raise StrategyV2ContractError("strategyV2.noMarketData")
@@ -143,7 +156,15 @@ class StrategyV2BacktestService:
 
         frequency = manifest.primary_frequency
         fetch_start = start_date - timedelta(
-            days=_warmup_calendar_days(frequency, manifest.warmup_bars)
+            days=backtest_warmup_calendar_days(frequency, manifest.warmup_bars)
+        )
+        _enforce_backtest_range(
+            candidates=candidates,
+            timeframe=frequency,
+            start_date=start_date,
+            end_date=end_date,
+            warmup_bars=manifest.warmup_bars,
+            fetch_start=fetch_start,
         )
         frames, skipped = self.fetch_frames(candidates, frequency, fetch_start, end_date)
         if not frames:
@@ -350,6 +371,37 @@ class StrategyV2BacktestService:
             raise StrategyV2ContractError(f"strategyV2.fundamentalDataMissing:{','.join(missing)}")
 
 
+def _enforce_backtest_range(
+    *,
+    candidates: list[dict[str, Any]],
+    timeframe: str,
+    start_date: datetime,
+    end_date: datetime,
+    warmup_bars: int,
+    fetch_start: datetime,
+) -> None:
+    errors: list[dict[str, Any]] = []
+    checked_markets: set[str] = set()
+    for candidate in candidates:
+        market = str(candidate.get("market") or "")
+        if market in checked_markets:
+            continue
+        checked_markets.add(market)
+        error = validate_backtest_range(
+            market=market,
+            symbol=str(candidate.get("symbol") or ""),
+            timeframe=timeframe,
+            start_date=start_date,
+            end_date=end_date,
+            warmup_bars=warmup_bars,
+            fetch_start=fetch_start,
+        )
+        if error:
+            errors.append(error)
+    if errors:
+        raise BacktestRangeLimitError(min(errors, key=lambda item: int(item["max_days"])))
+
+
 def _instrument_member(item: InstrumentSpec) -> dict[str, Any]:
     return {
         "key": item.key,
@@ -359,24 +411,6 @@ def _instrument_member(item: InstrumentSpec) -> dict[str, Any]:
         "market_type": item.market_type,
         "instrument_id": item.instrument_id,
     }
-
-
-def _warmup_calendar_days(frequency: str, warmup_bars: int) -> int:
-    bars = max(0, int(warmup_bars or 0))
-    if bars == 0:
-        return 0
-    normalized = str(frequency or "1d").strip().lower()
-    if normalized.endswith("m") and normalized[:-1].isdigit():
-        minutes = max(1, int(normalized[:-1]))
-        return max(1, math.ceil(bars * minutes * 1.5 / 1440.0))
-    if normalized.endswith("h") and normalized[:-1].isdigit():
-        hours = max(1, int(normalized[:-1]))
-        return max(1, math.ceil(bars * hours * 1.5 / 24.0))
-    if normalized.endswith("d"):
-        return max(2, math.ceil(bars * 7.0 / 5.0 * 1.35))
-    if normalized.endswith("w"):
-        return max(8, bars * 8)
-    return max(1, math.ceil(bars * 1.5))
 
 
 def _benchmark_for_manifest(manifest: StrategyManifest) -> InstrumentSpec | None:
