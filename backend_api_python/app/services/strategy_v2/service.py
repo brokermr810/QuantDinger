@@ -413,6 +413,11 @@ def _instrument_member(item: InstrumentSpec) -> dict[str, Any]:
     }
 
 
+def _warmup_calendar_days(frequency: str, warmup_bars: int) -> int:
+    """Keep the legacy helper available for internal callers and tests."""
+    return backtest_warmup_calendar_days(frequency, warmup_bars)
+
+
 def _benchmark_for_manifest(manifest: StrategyManifest) -> InstrumentSpec | None:
     if manifest.benchmark is not None:
         return manifest.benchmark
