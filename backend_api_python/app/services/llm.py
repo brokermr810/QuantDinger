@@ -69,7 +69,7 @@ PROVIDER_CONFIGS = {
     LLMProvider.ATLASCLOUD: {
         "base_url": "https://api.atlascloud.ai/v1",
         "default_model": "openai/gpt-5.4",
-        "fallback_model": "deepseek-v3",
+        "fallback_model": "openai/gpt-5.4",
     },
     LLMProvider.CUSTOM: {
         "base_url": "",  # User configured via CUSTOM_API_URL
@@ -752,14 +752,22 @@ class LLMService:
         
         # Build model candidates
         models_to_try = [model]
-        provider_default_model = PROVIDER_CONFIGS[p]["default_model"]
         if use_fallback:
-            fallback = PROVIDER_CONFIGS[p].get("fallback_model")
-            if fallback and fallback != model:
-                models_to_try.append(fallback)
+            configured_default = self._normalize_model_for_provider(
+                self.get_default_model(p),
+                p,
+            )
+            static_fallback = self._normalize_model_for_provider(
+                PROVIDER_CONFIGS[p].get("fallback_model") or "",
+                p,
+            )
+            for candidate in (configured_default, static_fallback):
+                if candidate and candidate not in models_to_try:
+                    models_to_try.append(candidate)
         
         last_error = None
         last_status_code = None
+        attempt_errors = []
         
         for current_model in models_to_try:
             try:
@@ -786,6 +794,7 @@ class LLMService:
                 status_code = e.status_code
                 last_status_code = status_code
                 last_error = str(e)
+                attempt_errors.append((current_model, str(e)))
                 logger.warning(
                     "%s API HTTP error (%s): %s",
                     p.value,
@@ -811,7 +820,20 @@ class LLMService:
                         excluded_provider=p,
                     )
 
-                if not use_fallback or current_model == models_to_try[-1]:
+                if not use_fallback:
+                    raise
+
+                if current_model == models_to_try[-1]:
+                    if len(attempt_errors) > 1:
+                        attempts = "; ".join(
+                            f"{attempt_model}: {attempt_error}"
+                            for attempt_model, attempt_error in attempt_errors
+                        )
+                        raise LLMAPIError(
+                            f"All model calls failed for {p.value}. Attempts: {attempts}",
+                            status_code=status_code,
+                            request_id=e.request_id,
+                        ) from e
                     raise
 
                 logger.warning(
